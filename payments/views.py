@@ -6,12 +6,14 @@ from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from django.views.generic import TemplateView
+from django.shortcuts import get_object_or_404
 
 from brands.models import Brand
 from orders.models import Order
 from .models import MercadoPagoPayment
 from .serializers import CheckoutProCreateSerializer
-from .services.mercadopago import create_preference, get_payment
+from .services.mercadopago import create_preference, get_payment, is_valid_webhook_signature
 
 
 class MercadoPagoCheckoutProCreateAPIView(APIView):
@@ -22,6 +24,8 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
 
     @transaction.atomic
     def post(self, request):
+        print(f"DEBUG: Body recibido -> {request.body}")
+        print(f"DEBUG: Data parseada -> {request.data}")
         serializer = CheckoutProCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -30,7 +34,6 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         if not brand:
             return Response({"detail": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Regla: solo marcas ecommerce/hybrid pueden pagar
         if brand.brand_type == "services":
             return Response(
                 {"detail": "This brand is services-only. No checkout available."},
@@ -38,20 +41,18 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             )
 
         items_for_mp = data["items"]
-
-        # Total real (fase 1: viene de items; fase 2: sale de DB de productos)
         total = Decimal("0")
         for it in items_for_mp:
             total += Decimal(str(it["unit_price"])) * Decimal(str(it["quantity"]))
 
-        external_reference = uuid.uuid4().hex  # único, fácil de mapear
+        external_reference = uuid.uuid4().hex
 
         order = Order.objects.create(
             brand=brand,
             status=Order.Status.PENDING,
             currency=os.getenv("MP_CURRENCY", "ARS"),
             total_amount=total,
-            items=[  # guardo en formato "humano"
+            items=[
                 {"title": it["title"], "qty": it["quantity"], "unit_price": it["unit_price"]}
                 for it in items_for_mp
             ],
@@ -59,15 +60,14 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             customer_email=data.get("customer_email", ""),
         )
 
-        frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+        backend_base = os.getenv("MP_NOTIFICATION_URL").split("/api/")[0]
         back_urls = {
-            "success": f"{frontend_base}/checkout/success?order_id={order.id}",
-            "failure": f"{frontend_base}/checkout/failure?order_id={order.id}",
-            "pending": f"{frontend_base}/checkout/pending?order_id={order.id}",
+            "success": f"{backend_base}/api/payments/checkout/success/?order_id={order.id}",
+            "failure": f"{backend_base}/api/payments/checkout/failure/?order_id={order.id}",
+            "pending": f"{backend_base}/api/payments/checkout/pending/?order_id={order.id}",
         }
 
-        # IMPORTANTE: notification_url debe ser accesible públicamente para MP (en dev usás ngrok)
-        # Por ahora lo ponemos por env para no hardcodear
+        # 1. Definimos y validamos la URL de notificación una sola vez
         notification_url = os.getenv("MP_NOTIFICATION_URL", "").strip()
         if not notification_url:
             return Response(
@@ -75,6 +75,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+        # 2. Creamos la preferencia una sola vez
         pref = create_preference(
             items=items_for_mp,
             external_reference=external_reference,
@@ -82,6 +83,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             back_urls=back_urls,
         )
 
+        # 3. Guardamos el registro del pago
         mp_payment = MercadoPagoPayment.objects.create(
             order=order,
             preference_id=str(pref.get("id", "")),
@@ -101,71 +103,92 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-
 class MercadoPagoWebhookAPIView(APIView):
-    """
-    POST /api/payments/mp/webhook/
-    Mercado Pago pega acá. Guardamos el evento y resolvemos el pago.
-
-    Nota: MP puede reintentar → endpoint debe ser idempotente.
-    """
-
     authentication_classes = []
     permission_classes = []
 
     def post(self, request):
-        payload = request.data or {}
+        # 1. Extraer identificadores del Webhook
+        # MP puede enviar el ID por Query Params (?id=...) o en el Body ({"data": {"id": ...}})
+        payment_id = request.GET.get("data.id") or request.data.get("data", {}).get("id") or request.GET.get("id")
+        topic = request.GET.get("type") or request.GET.get("topic") or request.data.get("type")
 
-        # MP suele mandar identificadores en payload o query.
-        # No asumimos formato exacto: buscamos "data.id" o "id".
-        payment_id = None
-        if isinstance(payload, dict):
-            payment_id = payload.get("data", {}).get("id") or payload.get("id")
+        print(f"DEBUG Webhook: Topic={topic}, ID={payment_id}")
+
+        # Si no es un evento de pago, respondemos 200 para que MP deje de notificar
+        if topic not in ["payment", "opened_dispute", "dispute"]:
+            return Response({"ok": True, "detail": f"Topic {topic} ignored"}, status=status.HTTP_200_OK)
 
         if not payment_id:
-            # igual respondemos 200 para que MP no reintente infinito por payload raro
-            return Response({"ok": True, "detail": "No payment id in webhook"}, status=200)
+            return Response({"error": "No payment ID found"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # 2. SEGURIDAD: Validar firma (Capa 1)
+        is_signature_valid = is_valid_webhook_signature(request)
+        
+        # 3. CONSULTA A LA API (Capa 2: Fuente de Verdad)
         try:
-            payment = get_payment(str(payment_id))
+            # Consultamos directamente a MP usando nuestro ACCESS_TOKEN
+            payment_info = get_payment(str(payment_id))
         except Exception as e:
-            # si falla, devolvemos 200 pero registrá el error luego
-            return Response({"ok": True, "detail": f"Could not fetch payment: {e}"}, status=200)
+            print(f"ERROR: No se pudo verificar el pago {payment_id} contra la API de MP: {e}")
+            # Si no podemos consultar la API, y la firma falló, rechazamos.
+            if not is_signature_valid:
+                return Response({"error": "Unauthorized and API check failed"}, status=status.HTTP_403_FORBIDDEN)
+            # Si la firma era válida pero la API falló (raro), reintentamos luego
+            return Response({"error": "MP API unreachable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        external_reference = str(payment.get("external_reference", "")).strip()
-        status_mp = str(payment.get("status", "")).strip().lower()
+        # 4. LÓGICA DE DECISIÓN BLINDADA
+        status_mp = payment_info.get("status")
+        external_reference = payment_info.get("external_reference")
 
-        # Mapeo de estados MP -> nuestro estado
-        if status_mp == "approved":
-            new_order_status = Order.Status.PAID
-            new_mp_status = MercadoPagoPayment.Status.APPROVED
-        elif status_mp in ("rejected", "cancelled"):
-            new_order_status = Order.Status.REJECTED
-            new_mp_status = MercadoPagoPayment.Status.REJECTED
-        else:
-            new_order_status = Order.Status.PENDING
-            new_mp_status = MercadoPagoPayment.Status.PENDING
+        # CRITERIO DE ACEPTACIÓN:
+        # Aceptamos la notificación SI la firma es válida O SI la API nos confirma que el pago es real
+        if not (is_signature_valid or status_mp in ["approved", "in_process", "rejected"]):
+            print(f"AVISO: Firma inválida y estado sospechoso para ID {payment_id}. Bloqueando.")
+            return Response({"error": "Security check failed"}, status=status.HTTP_403_FORBIDDEN)
 
-        # Buscamos order por external_reference (lo más confiable)
+        # 5. ACTUALIZACIÓN DE BASE DE DATOS
         order = Order.objects.filter(external_reference=external_reference).first()
         if not order:
-            return Response({"ok": True, "detail": "Order not found for external_reference"}, status=200)
+            print(f"AVISO: Se recibió pago {payment_id} pero no existe la orden {external_reference}")
+            return Response({"ok": True, "detail": "Order not found in DB"}, status=status.HTTP_200_OK)
 
-        mp_payment_obj, _ = MercadoPagoPayment.objects.get_or_create(order=order)
+        # Mapeo de estados de la Orden y del Pago
+        if status_mp == "approved":
+            order.status = Order.Status.PAID
+            new_mp_status = MercadoPagoPayment.Status.APPROVED
+            print(f"ORDEN {order.id}: Marcada como PAGADA (Verificado vía API)")
+        elif status_mp in ["rejected", "cancelled"]:
+            order.status = Order.Status.REJECTED
+            new_mp_status = MercadoPagoPayment.Status.REJECTED
+        else:
+            # "in_process", "in_mediation", "pending"
+            new_mp_status = MercadoPagoPayment.Status.PENDING
 
-        # Idempotencia: si ya está PAID, no lo “bajamos” jamás
-        if order.status != Order.Status.PAID:
-            order.status = new_order_status
-            order.save(update_fields=["status", "updated_at"])
+        order.save()
 
-        mp_payment_obj.mp_payment_id = str(payment.get("id", "")) or str(payment_id)
-        mp_payment_obj.status = new_mp_status
+        # Actualizar el registro detallado de MercadoPagoPayment
+        mp_payment = MercadoPagoPayment.objects.filter(order=order).first()
+        if mp_payment:
+            mp_payment.status = new_mp_status
+            mp_payment.mp_payment_id = str(payment_id)
+            # Guardamos el JSON de MP para auditoría
+            raw_data = mp_payment.raw or {}
+            raw_data["last_api_check"] = payment_info
+            raw_data["signature_was_valid"] = is_signature_valid
+            mp_payment.raw = raw_data
+            mp_payment.save()
 
-        # Guardamos evidencia
-        raw = mp_payment_obj.raw or {}
-        raw.setdefault("webhooks", []).append(payload)
-        raw["last_payment_fetch"] = payment
-        mp_payment_obj.raw = raw
-        mp_payment_obj.save(update_fields=["mp_payment_id", "status", "raw", "updated_at"])
+        return Response({"ok": True, "validated_by": "api" if not is_signature_valid else "signature"}, status=status.HTTP_200_OK)
+    
 
-        return Response({"ok": True}, status=200)
+class PaymentSuccessView(TemplateView):
+    template_name = "payments/success.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        # Obtenemos el order_id que viene en la URL (?order_id=...)
+        order_id = self.request.GET.get('order_id')
+        # Buscamos la orden o tiramos 404 si no existe
+        context['order'] = get_object_or_404(Order, id=order_id)
+        return context

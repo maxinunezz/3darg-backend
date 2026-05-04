@@ -2,10 +2,8 @@ services:
   db:
     image: postgres:16
     container_name: 3darg_db
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    env_file:
+    - ./3darg-backend/.env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -13,24 +11,34 @@ services:
     restart: unless-stopped
 
   web:
-    build: .
+    build: ./3darg-backend
     container_name: 3darg_web
     env_file:
-      - .env
+      - ./3darg-backend/.env
     volumes:
-      - .:/app
-      - ./media:/app/media
+      - ./3darg-backend:/app
+      - ./3darg-backend/media:/app/media
     ports:
       - "8000:8000"
     depends_on:
       - db
-    command: >
-      bash -c "
-      python -m pip install -r requirements.txt &&
-      python manage.py migrate &&
-      python manage.py runserver 0.0.0.0:8000
-      "
+    command: ./start-server.sh
     restart: unless-stopped
+
+  frontend:
+    build: ./ecommerce-frontend
+    container_name: ecommerce-frontend
+    env_file:
+      - ./ecommerce-frontend/.env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./ecommerce-frontend:/app
+      - /app/node_modules
+    depends_on:
+      - web
+    restart: unless-stopped
+
 
 volumes:
   postgres_data:
