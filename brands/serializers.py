@@ -33,6 +33,7 @@ class BrandSerializer(serializers.ModelSerializer):
             "cover_image",
             "theme",          # Colores y tipografía
             "social_links",   # Redes sociales
+            "page_config",    # Personalización de landing (copy, secciones, features)
             "links",          # Relación con BrandLink
             "children",       # Marcas hijas (MiniSlam, Print & Gym)
             "created_at",

@@ -1,21 +1,20 @@
 import os
 import hmac
 import hashlib
+import logging
 import mercadopago
 
+logger = logging.getLogger(__name__)
+
+
 def get_mp_sdk():
-    """
-    Inicializa el SDK con el Access Token del entorno.
-    """
     token = os.getenv("MP_ACCESS_TOKEN")
     if not token:
         raise RuntimeError("MP_ACCESS_TOKEN no configurado en el archivo .env")
     return mercadopago.SDK(token)
 
+
 def create_preference(*, items, external_reference, notification_url, back_urls):
-    """
-    Crea una preferencia de pago en Mercado Pago.
-    """
     sdk = get_mp_sdk()
 
     preference_data = {
@@ -30,35 +29,27 @@ def create_preference(*, items, external_reference, notification_url, back_urls)
         "auto_return": "approved",
     }
 
-    print(f"DEBUG: Enviando preferencia -> {preference_data}")
     result = sdk.preference().create(preference_data)
-    
+
     if result["status"] not in [200, 201]:
-        print(f"ERROR MP SDK FULL RESPONSE: {result}")
+        logger.error("MP SDK error al crear preferencia: %s", result)
         raise Exception(f"MP Error: {result['response']}")
 
     return result["response"]
 
+
 def get_payment(payment_id: str):
-    """
-    Consulta los detalles de un pago específico.
-    """
     sdk = get_mp_sdk()
     result = sdk.payment().get(str(payment_id))
-    
+
     if result["status"] == 200:
         return result["response"]
-    else:
-        print(f"ERROR MP SDK al buscar pago {payment_id}: {result['response']}")
-        raise Exception(f"No se pudo obtener el pago de MP")
 
-# mercadopago.py
+    logger.error("MP SDK error al buscar pago %s: %s", payment_id, result.get("response"))
+    raise Exception("No se pudo obtener el pago de MP")
 
-def is_valid_webhook_signature(request):
-    """
-    Intenta validar la firma. Si falla, devuelve False, 
-    pero la Vista usará get_payment como segunda capa de seguridad.
-    """
+
+def is_valid_webhook_signature(request) -> bool:
     secret = os.getenv("MP_WEBHOOK_SECRET")
     x_signature = request.headers.get("x-signature")
     x_request_id = request.headers.get("x-request-id")
@@ -70,19 +61,18 @@ def is_valid_webhook_signature(request):
     try:
         parts = {p.split("=")[0]: p.split("=")[1] for p in x_signature.split(",")}
         ts, v1 = parts.get("ts"), parts.get("v1")
-        
-        # Probamos el manifest con y sin ";" (las dos variantes de MP)
+
         manifests = [
             f"id:{resource_id};request-id:{x_request_id};ts:{ts};",
-            f"id:{resource_id};request-id:{x_request_id};ts:{ts}"
+            f"id:{resource_id};request-id:{x_request_id};ts:{ts}",
         ]
 
         for m in manifests:
             h = hmac.new(secret.encode(), msg=m.encode(), digestmod=hashlib.sha256).hexdigest()
             if hmac.compare_digest(h, v1):
                 return True
-        
+
         return False
     except Exception as e:
-        print(f"DEBUG: Error inesperado en validación de firma: {e}")
+        logger.warning("Error en validación de firma webhook: %s", e)
         return False

@@ -35,10 +35,19 @@ class BrandAdmin(admin.ModelAdmin):
         ("Branding y Contenido", {
             "fields": ("slogan", "short_description", "description", "logo", "cover_image")
         }),
-        ("Configuración Avanzada (JSON)", {
-            "description": "Configuración de estilos (theme) y enlaces a redes sociales.",
+        ("Estilos y Redes (JSON)", {
+            "description": "theme: CSS custom properties (colores). social_links: redes sociales.",
             "fields": ("theme", "social_links"),
-            "classes": ("collapse",), # Esta sección aparece contraída por defecto
+            "classes": ("collapse",),
+        }),
+        ("Configuración de Landing Page (JSON)", {
+            "description": (
+                "page_config controla el contenido y secciones de la página de la marca. "
+                "Claves: sections, features, stats, lifestyle_headline, lifestyle_subheadline, "
+                "lifestyle_cta, features_title, newsletter_title, newsletter_subtitle, newsletter_cta."
+            ),
+            "fields": ("page_config",),
+            "classes": ("collapse",),
         }),
     )
     

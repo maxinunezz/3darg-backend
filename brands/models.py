@@ -50,6 +50,22 @@ class Brand(models.Model):
     # Social links: {"instagram": "...", "tiktok": "...", "web": "..."}
     social_links = models.JSONField(default=dict, blank=True)
 
+    # Configuración completa de la landing page (copy, secciones, features, etc.)
+    # Ver documentación en BRAND_PAGE_CONFIG_SCHEMA
+    page_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Personalización de la landing. Claves disponibles: "
+            "sections (lista de secciones a mostrar), "
+            "hero_style (minimal|full|split), "
+            "lifestyle_headline, lifestyle_subheadline, lifestyle_cta, "
+            "features ([{icon, title, desc}]), "
+            "stats ([{value, label}]), "
+            "newsletter_title, newsletter_subtitle, newsletter_cta."
+        ),
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -1,22 +1,39 @@
-from django.shortcuts import render
+from rest_framework import generics
+from rest_framework.permissions import AllowAny
 from .models import Product, Category
 from .serializers import ProductSerializer, CategorySerializer
-from rest_framework import generics
+
 
 class ProductListAPIView(generics.ListAPIView):
     serializer_class = ProductSerializer
+    permission_classes = [AllowAny]
+    search_fields = ["name", "description"]
+    filterset_fields = ["is_featured", "is_available", "category__slug"]
+    ordering_fields = ["name", "price", "created_at"]
+    ordering = ["name"]
 
     def get_queryset(self):
-        queryset = Product.objects.all()
-        # Esto permite que Next.js filtre usando ?is_featured=true
-        is_featured = self.request.query_params.get('is_featured')
-        if is_featured is not None:
-            queryset = queryset.filter(is_featured=(is_featured.lower() == 'true'))
-        brand_slug = self.request.query_params.get('brand_slug')
+        qs = Product.objects.prefetch_related("images").select_related("category", "brand")
+        brand_slug = self.request.query_params.get("brand_slug")
         if brand_slug:
-            queryset = queryset.filter(brand__slug=brand_slug)
-        return queryset
+            qs = qs.filter(brand__slug=brand_slug)
+        return qs
+
+
+class ProductDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = ProductSerializer
+    permission_classes = [AllowAny]
+    lookup_field = "slug"
+    queryset = Product.objects.prefetch_related("images").select_related("category", "brand")
+
 
 class CategoryListAPIView(generics.ListAPIView):
-    queryset = Category.objects.all()
     serializer_class = CategorySerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        qs = Category.objects.all()
+        brand_slug = self.request.query_params.get("brand_slug")
+        if brand_slug:
+            qs = qs.filter(brand__slug=brand_slug)
+        return qs

@@ -6,6 +6,13 @@ from brands.models import Brand
 class Category(models.Model):
     name = models.CharField(max_length=100)
     slug = models.SlugField(unique=True)
+    brand = models.ForeignKey(
+        Brand,
+        on_delete=models.CASCADE,
+        related_name="categories",
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         ordering = ["name"]

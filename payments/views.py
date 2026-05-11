@@ -12,7 +12,8 @@ from django.views.generic import TemplateView
 from django.shortcuts import get_object_or_404
 
 from brands.models import Brand
-from orders.models import Order
+from orders.models import Order, OrderItem
+from products.models import Product
 from .models import MercadoPagoPayment
 from .serializers import CheckoutProCreateSerializer
 from .services.mercadopago import create_preference, get_payment, is_valid_webhook_signature
@@ -39,10 +40,47 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        items_for_mp = data["items"]
+        items_data = data["items"]
+        product_ids = [it["product_id"] for it in items_data]
+
+        products_qs = Product.objects.filter(
+            id__in=product_ids,
+            brand=brand,
+            is_available=True,
+        )
+        products_by_id = {p.id: p for p in products_qs}
+
+        missing = [pid for pid in product_ids if pid not in products_by_id]
+        if missing:
+            return Response(
+                {"detail": f"Producto(s) no disponible(s): {missing}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        stock_errors = []
+        for it in items_data:
+            product = products_by_id[it["product_id"]]
+            if product.stock < it["quantity"]:
+                stock_errors.append(
+                    f"'{product.name}': stock insuficiente ({product.stock} disponible(s))"
+                )
+        if stock_errors:
+            return Response(
+                {"detail": "; ".join(stock_errors)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        items_for_mp = []
         total = Decimal("0")
-        for it in items_for_mp:
-            total += Decimal(str(it["unit_price"])) * Decimal(str(it["quantity"]))
+        for it in items_data:
+            product = products_by_id[it["product_id"]]
+            qty = it["quantity"]
+            items_for_mp.append({
+                "title": product.name,
+                "quantity": qty,
+                "unit_price": float(product.price),
+            })
+            total += product.price * qty
 
         external_reference = uuid.uuid4().hex
 
@@ -52,13 +90,24 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             status=Order.Status.PENDING,
             currency=os.getenv("MP_CURRENCY", "ARS"),
             total_amount=total,
-            items=[
-                {"title": it["title"], "qty": it["quantity"], "unit_price": it["unit_price"]}
-                for it in items_for_mp
-            ],
             external_reference=external_reference,
-            customer_email=data.get("customer_email", "") or (request.user.email if request.user.is_authenticated else ""),
+            customer_email=(
+                data.get("customer_email", "")
+                or (request.user.email if request.user.is_authenticated else "")
+            ),
         )
+
+        order_items = [
+            OrderItem(
+                order=order,
+                product=products_by_id[it["product_id"]],
+                product_name=products_by_id[it["product_id"]].name,
+                quantity=it["quantity"],
+                unit_price=products_by_id[it["product_id"]].price,
+            )
+            for it in items_data
+        ]
+        OrderItem.objects.bulk_create(order_items)
 
         notification_url = os.getenv("MP_NOTIFICATION_URL", "").strip()
         if not notification_url:
@@ -108,8 +157,16 @@ class MercadoPagoWebhookAPIView(APIView):
     permission_classes = []
 
     def post(self, request):
-        payment_id = request.GET.get("data.id") or request.data.get("data", {}).get("id") or request.GET.get("id")
-        topic = request.GET.get("type") or request.GET.get("topic") or request.data.get("type")
+        payment_id = (
+            request.GET.get("data.id")
+            or request.data.get("data", {}).get("id")
+            or request.GET.get("id")
+        )
+        topic = (
+            request.GET.get("type")
+            or request.GET.get("topic")
+            or request.data.get("type")
+        )
 
         logger.info("Webhook recibido: topic=%s id=%s", topic, payment_id)
 
@@ -119,22 +176,18 @@ class MercadoPagoWebhookAPIView(APIView):
         if not payment_id:
             return Response({"error": "No payment ID found"}, status=status.HTTP_400_BAD_REQUEST)
 
-        is_signature_valid = is_valid_webhook_signature(request)
+        if not is_valid_webhook_signature(request):
+            logger.warning("Webhook rechazado: firma inválida para payment_id=%s", payment_id)
+            return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
 
         try:
             payment_info = get_payment(str(payment_id))
         except Exception as e:
             logger.error("No se pudo verificar el pago %s en MP: %s", payment_id, e)
-            if not is_signature_valid:
-                return Response({"error": "Unauthorized and API check failed"}, status=status.HTTP_403_FORBIDDEN)
             return Response({"error": "MP API unreachable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         status_mp = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
-
-        if not (is_signature_valid or status_mp in ["approved", "in_process", "rejected"]):
-            logger.warning("Firma inválida y estado sospechoso para pago %s", payment_id)
-            return Response({"error": "Security check failed"}, status=status.HTTP_403_FORBIDDEN)
 
         order = Order.objects.filter(external_reference=external_reference).first()
         if not order:
@@ -142,31 +195,35 @@ class MercadoPagoWebhookAPIView(APIView):
             return Response({"ok": True, "detail": "Order not found in DB"}, status=status.HTTP_200_OK)
 
         if status_mp == "approved":
-            order.status = Order.Status.PAID
+            new_order_status = Order.Status.PAID
             new_mp_status = MercadoPagoPayment.Status.APPROVED
-            logger.info("Orden %s marcada como PAGADA", order.id)
         elif status_mp in ["rejected", "cancelled"]:
-            order.status = Order.Status.REJECTED
+            new_order_status = Order.Status.REJECTED
             new_mp_status = MercadoPagoPayment.Status.REJECTED
         else:
+            new_order_status = order.status
             new_mp_status = MercadoPagoPayment.Status.PENDING
 
+        mp_payment = MercadoPagoPayment.objects.filter(order=order).first()
+
+        if mp_payment and mp_payment.mp_payment_id == str(payment_id) and mp_payment.status == new_mp_status:
+            logger.info("Webhook duplicado ignorado: payment_id=%s status=%s", payment_id, new_mp_status)
+            return Response({"ok": True, "detail": "Already processed"}, status=status.HTTP_200_OK)
+
+        order.status = new_order_status
         order.save()
 
-        mp_payment = MercadoPagoPayment.objects.filter(order=order).first()
         if mp_payment:
             mp_payment.status = new_mp_status
             mp_payment.mp_payment_id = str(payment_id)
             raw_data = mp_payment.raw or {}
             raw_data["last_api_check"] = payment_info
-            raw_data["signature_was_valid"] = is_signature_valid
             mp_payment.raw = raw_data
             mp_payment.save()
 
-        return Response(
-            {"ok": True, "validated_by": "signature" if is_signature_valid else "api"},
-            status=status.HTTP_200_OK,
-        )
+        logger.info("Orden %s actualizada: status=%s mp_status=%s", order.id, new_order_status, new_mp_status)
+
+        return Response({"ok": True}, status=status.HTTP_200_OK)
 
 
 class PaymentSuccessView(TemplateView):
