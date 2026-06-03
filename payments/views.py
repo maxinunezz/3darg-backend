@@ -40,6 +40,8 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        user = request.user if request.user.is_authenticated else None
+
         items_data = data["items"]
         product_ids = [it["product_id"] for it in items_data]
 
@@ -55,6 +57,14 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             return Response(
                 {"detail": f"Producto(s) no disponible(s): {missing}"},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Los productos members_only solo pueden comprarlos usuarios con cuenta.
+        members_only = [p.name for p in products_by_id.values() if p.members_only]
+        if members_only and user is None:
+            return Response(
+                {"detail": f"Necesitás una cuenta para comprar: {', '.join(members_only)}"},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         stock_errors = []
@@ -75,12 +85,13 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         for it in items_data:
             product = products_by_id[it["product_id"]]
             qty = it["quantity"]
+            unit_price = product.price_for(user)  # aplica descuento de socio si corresponde
             items_for_mp.append({
                 "title": product.name,
                 "quantity": qty,
-                "unit_price": float(product.price),
+                "unit_price": float(unit_price),
             })
-            total += product.price * qty
+            total += unit_price * qty
 
         external_reference = uuid.uuid4().hex
 
@@ -103,7 +114,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 product=products_by_id[it["product_id"]],
                 product_name=products_by_id[it["product_id"]].name,
                 quantity=it["quantity"],
-                unit_price=products_by_id[it["product_id"]].price,
+                unit_price=products_by_id[it["product_id"]].price_for(user),
             )
             for it in items_data
         ]

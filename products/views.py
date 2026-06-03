@@ -13,7 +13,11 @@ class ProductListAPIView(generics.ListAPIView):
     ordering = ["name"]
 
     def get_queryset(self):
-        qs = Product.objects.prefetch_related("images").select_related("category", "brand")
+        qs = (
+            Product.objects.visible_to(self.request.user)
+            .prefetch_related("images")
+            .select_related("category", "brand")
+        )
         brand_slug = self.request.query_params.get("brand_slug")
         if brand_slug:
             qs = qs.filter(brand__slug=brand_slug)
@@ -24,7 +28,14 @@ class ProductDetailAPIView(generics.RetrieveAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
     lookup_field = "slug"
-    queryset = Product.objects.prefetch_related("images").select_related("category", "brand")
+
+    def get_queryset(self):
+        # Los productos members_only devuelven 404 a anónimos (no se filtran al frontend).
+        return (
+            Product.objects.visible_to(self.request.user)
+            .prefetch_related("images")
+            .select_related("category", "brand")
+        )
 
 
 class CategoryListAPIView(generics.ListAPIView):

@@ -23,7 +23,7 @@ class CartAPIView(APIView):
 
     def get(self, request):
         cart = get_or_create_cart(request.user)
-        return Response(CartSerializer(cart).data)
+        return Response(CartSerializer(cart, context={"request": request}).data)
 
     def delete(self, request):
         cart = get_or_create_cart(request.user)
@@ -56,7 +56,7 @@ class CartItemAPIView(APIView):
         item.save()
 
         logger.info("Item agregado al carrito: user=%s product=%s qty=%s", request.user.email, product.slug, item.quantity)
-        return Response(CartSerializer(cart).data, status=status.HTTP_200_OK)
+        return Response(CartSerializer(cart, context={"request": request}).data, status=status.HTTP_200_OK)
 
     def patch(self, request, item_id):
         cart = get_or_create_cart(request.user)
@@ -66,7 +66,7 @@ class CartItemAPIView(APIView):
             return Response({"detail": "quantity debe ser >= 1"}, status=status.HTTP_400_BAD_REQUEST)
         item.quantity = int(qty)
         item.save()
-        return Response(CartSerializer(cart).data)
+        return Response(CartSerializer(cart, context={"request": request}).data)
 
     def delete(self, request, item_id):
         cart = get_or_create_cart(request.user)

@@ -1,6 +1,23 @@
+from decimal import Decimal, ROUND_HALF_UP
+
+from django.core.validators import MaxValueValidator
 from django.db import models
 from django.utils.text import slugify
 from brands.models import Brand
+
+
+class ProductQuerySet(models.QuerySet):
+    """Scoping de visibilidad por estado de autenticación."""
+
+    def visible_to(self, user):
+        """Productos que este usuario puede ver.
+
+        Los productos `members_only` solo son visibles para usuarios autenticados;
+        para anónimos se ocultan por completo (no aparecen en listados ni detalle).
+        """
+        if user and getattr(user, "is_authenticated", False):
+            return self
+        return self.filter(members_only=False)
 
 
 class Category(models.Model):
@@ -29,6 +46,15 @@ class Product(models.Model):
     stock = models.PositiveIntegerField(default=0)
     is_available = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
+    members_only = models.BooleanField(
+        default=False,
+        help_text="Si está activo, el producto solo es visible y comprable por usuarios con cuenta.",
+    )
+    member_discount_percent = models.PositiveSmallIntegerField(
+        default=0,
+        validators=[MaxValueValidator(100)],
+        help_text="Descuento (%) que reciben los usuarios con cuenta sobre este producto. 0 = sin descuento.",
+    )
     category = models.ForeignKey(Category, on_delete=models.CASCADE, related_name="products")
     brand = models.ForeignKey(
         Brand,
@@ -40,6 +66,8 @@ class Product(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = ProductQuerySet.as_manager()
+
     class Meta:
         ordering = ["-is_featured", "name"]
 
@@ -50,6 +78,31 @@ class Product(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def has_member_discount(self) -> bool:
+        return self.member_discount_percent > 0
+
+    @property
+    def member_price(self) -> Decimal:
+        """Precio con el descuento de socio aplicado (sin importar quién consulta)."""
+        if not self.has_member_discount:
+            return self.price
+        factor = (Decimal(100) - Decimal(self.member_discount_percent)) / Decimal(100)
+        return (self.price * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def price_for(self, user) -> Decimal:
+        """Precio efectivo que paga `user`.
+
+        Fuente de verdad del cobro: usada por cart, checkout y serializers.
+        Los usuarios autenticados pagan `member_price`; los anónimos, `price`.
+        """
+        if user and getattr(user, "is_authenticated", False):
+            return self.member_price
+        return self.price
+
+    def is_visible_to(self, user) -> bool:
+        return (not self.members_only) or bool(user and getattr(user, "is_authenticated", False))
 
 
 class ProductImage(models.Model):
