@@ -63,6 +63,15 @@ class Product(models.Model):
         null=True,
         blank=True,
     )
+    # Integración BamBuddy: ID del archivo en la Library de BamBuddy.
+    # Si está seteado, al pagarse una orden con este producto se encola
+    # automáticamente en la impresora. Se gestiona desde el admin de Django.
+    bambuddy_file_id = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="ID del archivo en BamBuddy Library. Si está seteado, se envía a imprimir automáticamente al pagarse una orden.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

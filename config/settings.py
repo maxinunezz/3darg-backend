@@ -7,9 +7,34 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# --- Sentry (monitoreo de errores) ---
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+if SENTRY_DSN:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        send_default_pii=True,
+        enable_logs=True,
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
+        profile_session_sample_rate=float(os.getenv("SENTRY_PROFILE_SAMPLE_RATE", "1.0")),
+        profile_lifecycle="trace",
+        environment="development" if os.getenv("DJANGO_DEBUG", "0") == "1" else "production",
+    )
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-change-me")
 DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost").split(",") if h.strip()]
+
+# --- Google OAuth (login "Continuar con Google") ---
+# Client ID de un proyecto en Google Cloud Console (OAuth consent screen + credencial
+# "Web application"). Sin esto, /api/users/google/ responde 400 explicando que falta config.
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+
+# --- BamBuddy (cola de impresión automática) ---
+BAMBUDDY_URL = os.getenv("BAMBUDDY_URL", "")          # ej: http://localhost:8001
+BAMBUDDY_API_KEY = os.getenv("BAMBUDDY_API_KEY", "")  # generado en BamBuddy Settings → API Keys
+BAMBUDDY_PRINTER_ID = int(os.getenv("BAMBUDDY_PRINTER_ID", "1"))  # ID de la impresora en BamBuddy
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -108,12 +133,29 @@ SIMPLE_JWT = {
 }
 
 # --- CORS ---
+# En dev el default cubre localhost; en prod se setean por env con la URL real
+# del frontend (ej: CORS_ALLOWED_ORIGINS=https://tienda.3darg.com).
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
+    o.strip()
+    for o in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
 ]
 CSRF_TRUSTED_ORIGINS = [
-    "https://*.ngrok-free.app",
+    o.strip()
+    for o in os.getenv(
+        "CSRF_TRUSTED_ORIGINS", "https://*.ngrok-free.app"
+    ).split(",")
+    if o.strip()
 ]
+
+# --- Seguridad detrás de un reverse proxy (Caddy) en producción ---
+# Caddy termina TLS y reenvía por HTTP interno con X-Forwarded-Proto=https.
+# Sin esto Django cree que la request es http y rompe cookies/redirects seguros.
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "0") == "1"
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 # --- Email ---
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")

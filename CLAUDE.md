@@ -49,6 +49,9 @@ MP_WEBHOOK_SECRET=...           # firma HMAC del webhook
 MP_NOTIFICATION_URL=https://<ngrok>/api/payments/mp/webhook/
 MP_CURRENCY=ARS
 FRONTEND_BASE_URL=http://localhost:3000   # usado para back_urls de MP
+
+GOOGLE_OAUTH_CLIENT_ID=...      # Client ID de Google Cloud Console (login "Continuar con Google")
+                                 # Vacío = /api/users/google/ responde 400 explicando que falta config
 ```
 
 El mismo `.env` es leído por los servicios `db` y `web` en `docker-compose.yml`.
@@ -76,7 +79,7 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 | App | Endpoint base | Endpoints clave |
 |-----|---------------|-----------------|
 | (auth JWT) | `/api/auth/` | `POST /token/`, `POST /token/refresh/` |
-| `users` | `/api/users/` | `POST /register/` (alta + opcional `brand_slug`), `GET\|PATCH /me/`, `GET\|POST /favorites/`, `DELETE /favorites/<product_id>/` |
+| `users` | `/api/users/` | `POST /register/` (alta + opcional `brand_slug`), `POST /google/` (login/registro con Google ID token + opcional `brand_slug`), `GET\|PATCH /me/`, `GET\|POST /favorites/`, `DELETE /favorites/<product_id>/` |
 | `brands` | `/api/brands/` | `GET /` — lista de marcas **root** activas + sus `children` anidados recursivamente |
 | `products` | `/api/` | `GET /products/` (filtros: `?search=`, `?brand_slug=`, `?is_featured=`, `?is_available=`, `?category__slug=`), `GET /products/<slug>/`, `GET /categories/?brand_slug=` |
 | `cart` | `/api/cart/` | `GET\|DELETE /`, `POST /items/`, `PATCH\|DELETE /items/<id>/` — **todo requiere auth** |
@@ -143,6 +146,13 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 - JWT: `ACCESS_TOKEN_LIFETIME=2h`, `REFRESH_TOKEN_LIFETIME=7d`, `ROTATE_REFRESH_TOKENS=True`.
 - Throttling: anónimos `10000/day`, usuarios `50000/day`. `contact` aplica un throttle adicional de `5/hour` por IP.
 - CORS: solo `http://localhost:3000` (cambiar en prod). CSRF acepta `*.ngrok-free.app` para los webhooks de MP en desarrollo.
+
+### Login con Google (`POST /api/users/google/`)
+
+- `AllowAny`. Recibe `{id_token, brand_slug?}`, verifica el token con `google.oauth2.id_token.verify_oauth2_token()` contra `settings.GOOGLE_OAUTH_CLIENT_ID` y exige `email_verified`.
+- `GoogleAuthSerializer` (`users/serializers.py`) hace **get_or_create por email** — mismo `User` unificado usado en todo el Grupo, no crea identidades separadas por marca. Si es un alta nueva: genera `username` único desde el email (`_generate_username`) y setea `registered_brand` con el `brand_slug` recibido (igual que `RegisterSerializer`).
+- Devuelve el mismo shape `{access, refresh}` que `/api/auth/token/` — el frontend no necesita lógica de sesión distinta.
+- Sin `GOOGLE_OAUTH_CLIENT_ID` configurado, el endpoint responde 400 con mensaje claro. Es el mecanismo por el que la feature queda "apagada" hasta configurar Google Cloud Console.
 
 ---
 

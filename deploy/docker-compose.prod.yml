@@ -1,0 +1,63 @@
+# docker-compose.prod.yml — stack de PRODUCCIÓN del backend 3DARG (VPS).
+#
+# El FRONTEND va en Vercel, NO acá. Este stack corre solo el backend:
+#   db (Postgres) + web (Django/gunicorn) + caddy (HTTPS + reverse proxy).
+#
+# Vive dentro del repo 3darg-backend (carpeta deploy/), así un solo
+# `git clone` del backend trae todo lo necesario para desplegar.
+#
+# Uso (desde 3darg-backend/deploy/):
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml logs -f
+#
+# Rutas relativas: el contexto de build es `..` (raíz del repo backend), donde
+# está el Dockerfile. media/ y .env también viven en la raíz del repo.
+
+services:
+  db:
+    image: postgres:16
+    container_name: 3darg_db_prod
+    env_file:
+      - ../.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+    container_name: 3darg_web_prod
+    env_file:
+      - ../.env
+    volumes:
+      # Solo media (uploads) es persistente y compartido con Caddy.
+      # El código NO se monta: viaja dentro de la imagen.
+      - ../media:/app/media
+    depends_on:
+      - db
+    command: ./start-server.sh
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: 3darg_caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Media compartida con web, servida directo por Caddy.
+      - ../media:/srv/media:ro
+      # Persistencia de certificados TLS: sin esto Caddy re-emite en cada reinicio.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  # En el VPS la base arranca vacía y este volumen la persiste. NO es external
+  # (a diferencia del compose de dev), porque es una instalación nueva.
+  postgres_data:
+  caddy_data:
+  caddy_config:

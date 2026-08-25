@@ -1,9 +1,13 @@
+import json
 import logging
-from django.db import transaction
-from django.db.models.signals import pre_save, post_save
-from django.dispatch import receiver
-from django.core.mail import send_mail
+import urllib.error
+import urllib.request
+
 from django.conf import settings
+from django.core.mail import send_mail
+from django.db import transaction
+from django.db.models.signals import post_save, pre_save
+from django.dispatch import receiver
 
 from products.models import Product
 from .models import Order
@@ -43,6 +47,7 @@ def handle_order_status_change(sender, instance, created, **kwargs):
     if paid_now:
         _decrement_stock(instance)
         _send_payment_email(instance)
+        _trigger_bambuddy_print(instance)
     elif paid_undone:
         _restore_stock(instance)
 
@@ -73,6 +78,76 @@ def _restore_stock(order):
             logger.info(
                 "Stock restituido: product=%s qty=+%s stock_actual=%s",
                 product.slug, item.quantity, product.stock,
+            )
+
+
+def _trigger_bambuddy_print(order):
+    """Encola en BamBuddy cada item de la orden para impresión automática.
+
+    Solo actúa si BAMBUDDY_URL y BAMBUDDY_API_KEY están configurados en .env.
+    Los errores se loguean pero nunca rompen el flujo de pago.
+    Requiere que cada Product tenga `bambuddy_file_id` seteado.
+    """
+    bambuddy_url = getattr(settings, "BAMBUDDY_URL", "").rstrip("/")
+    api_key = getattr(settings, "BAMBUDDY_API_KEY", "")
+    printer_id = getattr(settings, "BAMBUDDY_PRINTER_ID", 1)
+
+    if not bambuddy_url or not api_key:
+        logger.debug("BamBuddy no configurado — se omite encolado automático para orden %s", order.id)
+        return
+
+    items = order.order_items.select_related("product").all()
+    for item in items:
+        if not item.product_id:
+            continue
+
+        file_id = getattr(item.product, "bambuddy_file_id", None)
+        if not file_id:
+            logger.warning(
+                "Producto '%s' (orden %s) sin bambuddy_file_id — no se encola",
+                item.product_name, order.id,
+            )
+            continue
+
+        payload = json.dumps({
+            "library_file_id": file_id,
+            "printer_id": printer_id,
+            "quantity": item.quantity,
+            "bed_levelling": "auto",
+            "flow_cali": "auto",
+            "vibration_cali": True,
+            "layer_inspect": False,
+            "timelapse": False,
+            "use_ams": True,
+            "manual_start": False,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{bambuddy_url}/api/v1/queue/",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Key": api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+                logger.info(
+                    "BamBuddy: encolado trabajo #%s — orden=%s producto='%s' file_id=%s cantidad=%s",
+                    result.get("id"), order.id, item.product_name, file_id, item.quantity,
+                )
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            logger.error(
+                "BamBuddy HTTP %s al encolar orden=%s producto='%s': %s",
+                e.code, order.id, item.product_name, body,
+            )
+        except Exception as e:
+            logger.error(
+                "BamBuddy error inesperado al encolar orden=%s producto='%s': %s",
+                order.id, item.product_name, e,
             )
 
 

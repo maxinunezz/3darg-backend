@@ -1,0 +1,23 @@
+# Caddyfile — reverse proxy de producción del backend 3DARG (modo SOLO API).
+#
+# El frontend Next.js va en Vercel; acá solo vive el backend Django + Postgres.
+# Caddy resuelve HTTPS solo (Let's Encrypt) apenas el dominio apunte por DNS a
+# la IP del servidor. No hay que tocar certificados a mano.
+#
+# Reemplazá api.3darg.com por tu subdominio real antes de desplegar.
+# El registro A de ese subdominio tiene que apuntar a la IP del VPS.
+
+api.3darg.com {
+	encode gzip
+
+	# Media (uploads: logos, fotos de productos) servida directo por Caddy,
+	# desde el mismo volumen que escribe Django. En prod Django (DEBUG=0) no
+	# sirve media, así que esto es obligatorio.
+	handle_path /media/* {
+		root * /srv/media
+		file_server
+	}
+
+	# Todo lo demás va a gunicorn.
+	reverse_proxy web:8000
+}
