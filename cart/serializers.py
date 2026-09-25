@@ -47,4 +47,5 @@ class CartSerializer(serializers.ModelSerializer):
 class AddToCartSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
     quantity = serializers.IntegerField(min_value=1, default=1)
-    brand_slug = serializers.CharField(required=False, allow_blank=True)
+    # Obligatorio: cada carrito pertenece a una única marca (ver cart/models.py).
+    brand_slug = serializers.CharField()

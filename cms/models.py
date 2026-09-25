@@ -44,3 +44,19 @@ class Section(models.Model):
 
     def __str__(self):
         return f"{self.page} - {self.type} ({self.order})"
+
+
+class SectionImage(models.Model):
+    section = models.ForeignKey(Section, related_name="images", on_delete=models.CASCADE)
+    # Direcciona la imagen dentro de una sección con varias (ej. "team_1", "cover").
+    # Vacío = imagen única/principal de la sección.
+    key = models.SlugField(max_length=60, blank=True)
+    image = models.ImageField(upload_to="cms/sections/")
+    alt_text = models.CharField(max_length=200, blank=True)
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["order", "id"]
+
+    def __str__(self):
+        return f"{self.section} - {self.key or 'main'}"

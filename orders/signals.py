@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import urllib.error
 import urllib.request
 
@@ -9,6 +10,7 @@ from django.db import transaction
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
+from brands.services.meta_conversions import hash_user_data, send_event as send_meta_event
 from products.models import Product
 from .models import Order
 
@@ -48,6 +50,7 @@ def handle_order_status_change(sender, instance, created, **kwargs):
         _decrement_stock(instance)
         _send_payment_email(instance)
         _trigger_bambuddy_print(instance)
+        _send_meta_purchase_event(instance)
     elif paid_undone:
         _restore_stock(instance)
 
@@ -149,6 +152,41 @@ def _trigger_bambuddy_print(order):
                 "BamBuddy error inesperado al encolar orden=%s producto='%s': %s",
                 order.id, item.product_name, e,
             )
+
+
+def _send_meta_purchase_event(order):
+    """Dispara el evento `Purchase` a Meta Conversions API para la marca de la orden.
+
+    `event_id = order.external_reference` — si en el futuro se agrega el
+    Pixel client-side en la página de éxito, debe usar el mismo `event_id`
+    para que Meta deduplique el evento client-side y el server-side en vez
+    de contarlo dos veces.
+
+    Se omite en silencio si la marca no tiene `meta_config` cargado
+    (`send_event` ya loguea y no rompe el flujo de pago).
+    """
+    frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+    contents = [
+        {
+            "id": item.product.sku if item.product_id and item.product else "",
+            "quantity": item.quantity,
+            "item_price": float(item.unit_price),
+        }
+        for item in order.order_items.select_related("product").all()
+    ]
+    send_meta_event(
+        order.brand,
+        event_name="Purchase",
+        event_id=order.external_reference,
+        user_data=hash_user_data(email=order.customer_email),
+        custom_data={
+            "currency": order.currency,
+            "value": float(order.total_amount),
+            "contents": contents,
+            "content_type": "product",
+        },
+        event_source_url=f"{frontend_base}/checkout/success/?order_id={order.id}",
+    )
 
 
 def _send_payment_email(order):

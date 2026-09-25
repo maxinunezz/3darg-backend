@@ -30,17 +30,45 @@ class Category(models.Model):
         null=True,
         blank=True,
     )
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.CASCADE,
+        related_name="children",
+        null=True,
+        blank=True,
+        help_text=(
+            "Categoria padre, para armar jerarquias (ej: Cortantes > Halloween). "
+            "Vacio = categoria de nivel superior."
+        ),
+    )
 
     class Meta:
         ordering = ["name"]
+        verbose_name_plural = "categories"
 
     def __str__(self):
+        if self.parent_id:
+            return f"{self.parent.name} > {self.name}"
         return self.name
 
 
 class Product(models.Model):
     name = models.CharField(max_length=200)
     slug = models.SlugField(unique=True, blank=True)
+    sku = models.CharField(
+        max_length=64,
+        unique=True,
+        blank=True,
+        help_text="Identificador único de catálogo (feeds de Meta/Google). Se autogenera desde el ID si se deja vacío.",
+    )
+    google_product_category = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=(
+            "Categoría de la taxonomía de Google/Meta (ej: '1239' o "
+            "'Sporting Goods > Exercise & Fitness'). Usada en el feed de Meta Catalog."
+        ),
+    )
     description = models.TextField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.PositiveIntegerField(default=0)
@@ -83,7 +111,11 @@ class Product(models.Model):
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)
+        is_new = self._state.adding
         super().save(*args, **kwargs)
+        if is_new and not self.sku:
+            self.sku = f"3DARG-{self.pk:06d}"
+            super().save(update_fields=["sku"])
 
     def __str__(self):
         return self.name

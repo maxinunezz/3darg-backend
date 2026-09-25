@@ -15,6 +15,7 @@ class BrandSerializer(serializers.ModelSerializer):
     """
     children = serializers.SerializerMethodField()
     links = BrandLinkSerializer(many=True, read_only=True)
+    meta_public_config = serializers.SerializerMethodField()
 
     class Meta:
         model = Brand
@@ -31,11 +32,12 @@ class BrandSerializer(serializers.ModelSerializer):
             "description",
             "logo",
             "cover_image",
-            "theme",          # Colores y tipografía
-            "social_links",   # Redes sociales
-            "page_config",    # Personalización de landing (copy, secciones, features)
-            "links",          # Relación con BrandLink
-            "children",       # Marcas hijas (MiniSlam, Print & Gym)
+            "theme",               # Colores y tipografía
+            "social_links",        # Redes sociales
+            "page_config",         # Personalización de landing (copy, secciones, features)
+            "meta_public_config",  # Subset seguro de meta_config (Pixel ID, Catalog ID) — sin tokens
+            "links",                # Relación con BrandLink
+            "children",              # Marcas hijas (MiniSlam, Print & Gym)
             "created_at",
             "updated_at",
         ]
@@ -46,3 +48,14 @@ class BrandSerializer(serializers.ModelSerializer):
         """
         children = obj.children.filter(is_active=True)
         return BrandSerializer(children, many=True).data
+
+    def get_meta_public_config(self, obj):
+        """
+        Solo las claves de `meta_config` seguras para exponer en el frontend
+        (usadas por el Meta Pixel client-side). `conversions_api_access_token`
+        es un secreto server-side y nunca se serializa acá.
+        """
+        return {
+            "pixel_id": obj.meta_config.get("pixel_id", ""),
+            "catalog_id": obj.meta_config.get("catalog_id", ""),
+        }

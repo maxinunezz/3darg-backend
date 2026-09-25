@@ -82,11 +82,12 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 | `users` | `/api/users/` | `POST /register/` (alta + opcional `brand_slug`), `POST /google/` (login/registro con Google ID token + opcional `brand_slug`), `GET\|PATCH /me/`, `GET\|POST /favorites/`, `DELETE /favorites/<product_id>/` |
 | `brands` | `/api/brands/` | `GET /` — lista de marcas **root** activas + sus `children` anidados recursivamente |
 | `products` | `/api/` | `GET /products/` (filtros: `?search=`, `?brand_slug=`, `?is_featured=`, `?is_available=`, `?category__slug=`), `GET /products/<slug>/`, `GET /categories/?brand_slug=` |
-| `cart` | `/api/cart/` | `GET\|DELETE /`, `POST /items/`, `PATCH\|DELETE /items/<id>/` — **todo requiere auth** |
+| `cart` | `/api/cart/` | `GET\|DELETE /` (exigen `?brand_slug=`), `POST /items/` (exige `brand_slug` en el body), `PATCH\|DELETE /items/<id>/` — **todo requiere auth**. Sin `brand_slug` → 400 |
 | `orders` | `/api/orders/` | `GET /` (lista del usuario, filtrable por `?status=`), `GET /<uuid>/`, `GET /summary/` (totales + counts por status) |
 | `payments` | `/api/payments/` | `POST /mp/checkout-pro/`, `POST /mp/webhook/`, `GET /checkout/success/` (template HTML server-rendered) |
 | `cms` | `/api/cms/` | `GET /pages/<brand_slug>/<page_slug>/` |
 | `contact` | `/api/contact/` | `POST /` — manda email a `CONTACT_EMAIL` + confirmación al usuario (throttle 5/h por IP) |
+| `vending` | `/api/vending/` | `POST /leads/` — captura leads de la máquina expendedora (`AllowAny`, throttle 5/h por IP), manda mail a `CONTACT_EMAIL`. Consumido por la landing `/maquina-expendedora` del frontend |
 
 ---
 
@@ -118,9 +119,11 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
   - El `CartSerializer` necesita `context={"request": request}` para resolver el precio de socio (ya pasado en `cart/views.py`).
 
 ### `cart.Cart`
-- `OneToOne(User)` — **un solo carrito por usuario**, no por marca. La marca queda en `cart.brand` como contexto del último add.
+- `ForeignKey(User, related_name="carts")` + `ForeignKey(Brand, related_name="carts")` **no nullable**, `unique_together(user, brand)` — **un carrito por (usuario, marca)**. Cada espacio de marca (3DARG incluida) tiene el suyo, aislado del resto.
 - `CartItem(cart, product, quantity)` con `unique_together(cart, product)`.
-- `get_or_create_cart(user)` en `cart/views.py` es el único punto de entrada.
+- `get_or_create_cart(user, brand)` en `cart/views.py` recibe `brand` (objeto `Brand`) obligatorio — ya no hay overload sin marca. Las vistas resuelven `brand_slug` de `query_params` (GET/DELETE) o del body (POST `/items/`); si falta o no existe esa Brand → 400 en español.
+- Al agregar un item se valida que `product.brand` (si tiene) coincida con la `brand` del carrito — si no, 400 ("Este producto no pertenece a la marca actual").
+- Migración `cart/migrations/0003_cart_por_marca.py` + `0004_cart_por_marca_schema.py`: backfillean los `Cart` viejos con `brand=null` a la marca raíz (`slug="3darg"`) y fusionan duplicados por `(user, brand)` antes de aplicar el `unique_together`. Separadas en dos migraciones porque Postgres no permite `ALTER TABLE` en la misma transacción que el `RunPython` (pending trigger events).
 
 ### `orders.Order`
 - **PK = UUID** (no integer). Las URLs usan `<uuid:id>`.
@@ -136,6 +139,36 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 
 ### `cms.Page` / `cms.Section`
 - Sistema flexible de páginas por marca. `Section.data` (JSONField) tiene la config de cada sección. Por ahora poco usado — la mayoría del copy va en `Brand.page_config`.
+
+### `vending.VendingLead`
+- Modelo simple de captura de leads para la línea de negocio "máquina expendedora de impresión 3D" (todavía en validación, no es una sub-marca de ecommerce).
+- `segmento` (choices): `cotillon` (venta bajo pedido), `empresa` (máquina in-situ, impresión remota), `submarca` (uso interno del grupo: shopping, gimnasio, etc.), `alquiler` (marca privada, edición limitada), `otro`.
+- Sin auth (`AllowAny` + throttle `5/hour` por IP, igual patrón que `contact`). Al crear un lead, `VendingLeadAPIView.post()` manda mail a `CONTACT_EMAIL` con `fail_silently=True` (un fallo de email no rompe la captura del lead).
+- No tiene relación con `Brand`/`products` — es standalone, todavía no hay modelo de negocio ni pricing definido.
+
+---
+
+## Integración Meta Business (Pixel + Conversions API)
+
+`brands/services/meta_conversions.py::send_event()` — envía eventos server-side a Meta Conversions API usando `pixel_id` + `conversions_api_access_token` que cada `Brand` guarda en `meta_config` (JSONField). Mismo patrón que Google OAuth: si la marca no tiene `meta_config` cargado, la función es un no-op (`return False`), no rompe el flujo.
+
+- Se dispara desde `orders/signals.py` en la confirmación de pago (evento `Purchase`), con `event_id = order.external_reference` para que Meta deduplique contra el Pixel client-side que dispara el mismo evento en el frontend.
+- PII (`email`, `phone`) se hashea SHA256 antes de mandarse (`hash_user_data()`), como exige Meta.
+- **Nunca lanza excepción** — cualquier error de red/API se loguea (`logger.error`) y devuelve `False`; el pago sigue su curso igual.
+- `meta_config` también trae `catalog_id` y `whatsapp_business_phone_id`, reservados para integraciones futuras (catálogo de productos en Meta, WhatsApp Business) — hoy solo se usa `pixel_id`/`conversions_api_access_token`.
+
+---
+
+## Deploy en producción (`deploy/`)
+
+El **frontend va a Vercel** (fuera de este repo). Este backend se despliega en un **VPS propio** con su propio stack, separado del `docker-compose.yml` de desarrollo:
+
+- `deploy/docker-compose.prod.yml`: `db` (Postgres 16) + `web` (build de este repo, código empaquetado en la imagen — **no** bind mount como en dev) + `caddy` (HTTPS automático + reverse proxy + sirve `media/` directo).
+- `deploy/Caddyfile`: config del reverse proxy/TLS.
+- `deploy/deploy.sh`: script de despliegue.
+- `deploy/backup-db.sh`, `deploy/reconcile-cron.sh`: mantenimiento programado.
+- Se corre desde `deploy/` (contexto de build `..`, o sea la raíz de este repo): `docker compose -f docker-compose.prod.yml up -d --build`.
+- Volúmenes persistentes: `postgres_data`, `caddy_data`, `caddy_config` — **no** `external: true` acá (a diferencia del compose de dev), porque en el VPS arrancan vacíos.
 
 ---
 
@@ -182,15 +215,16 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 
 ## Brand scoping en el backend
 
-El backend **no impone silos por marca** — devuelve toda la data del usuario. El filtrado por marca lo hace el frontend (regla del monorepo). Eso significa:
+Para `users.Favorite` y `orders.Order` el backend **sigue sin imponer silos por marca a nivel de queryset** — devuelve toda la data del usuario, y el filtrado por marca (incluida 3DARG, que ya NO ve todo) lo hace el frontend. Eso significa:
 
 - `GET /api/users/favorites/` → **todos** los favoritos del usuario, sin filtrar.
 - `GET /api/orders/` → **todas** las órdenes del usuario, sin filtrar.
-- Los serializers de `Product` y `Order` exponen `brand` como **slug** (no ID) precisamente para que el frontend pueda filtrar con `.filter(p => p.brand === brandSlug)`.
+- Los serializers de `Product` y `Order` exponen `brand` como **slug** (no ID) precisamente para que el frontend pueda filtrar con `.filter(p => p.brand === brandSlug)`. `/(main)/profile` filtra por `brand === "3darg" || brand == null` (igual criterio que `/[brand]/profile`, aplicado a la marca raíz).
 
 Donde sí hay scoping en backend:
 - `/api/products/?brand_slug=lumy` filtra por marca a nivel queryset.
 - Checkout exige `brand_slug` y valida que los productos pertenezcan a esa marca antes de cobrar.
+- **`cart` sí es un silo real en el backend** (a diferencia de favorites/orders): `Cart` es `unique_together(user, brand)` y todos sus endpoints exigen `brand_slug` — no hay forma de pedir "el carrito sin especificar marca". Ver `cart.Cart` arriba.
 
 ---
 

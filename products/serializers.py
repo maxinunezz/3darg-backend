@@ -3,9 +3,14 @@ from .models import Product, Category, ProductImage
 
 
 class CategorySerializer(serializers.ModelSerializer):
+    # Info del padre "aplanada" para que el frontend pueda agrupar sin pedidos extra.
+    parent_id = serializers.IntegerField(source="parent.id", read_only=True, allow_null=True)
+    parent_name = serializers.CharField(source="parent.name", read_only=True, allow_null=True, default=None)
+    parent_slug = serializers.CharField(source="parent.slug", read_only=True, allow_null=True, default=None)
+
     class Meta:
         model = Category
-        fields = ["id", "name", "slug"]
+        fields = ["id", "name", "slug", "parent_id", "parent_name", "parent_slug"]
 
 
 class ProductImageSerializer(serializers.ModelSerializer):
@@ -30,6 +35,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "slug",
+            "sku",
             "description",
             "price",
             "member_price",

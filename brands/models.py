@@ -50,6 +50,20 @@ class Brand(models.Model):
     # Social links: {"instagram": "...", "tiktok": "...", "web": "..."}
     social_links = models.JSONField(default=dict, blank=True)
 
+    # Integración Meta Business (Pixel, Conversions API, Catalog, WhatsApp).
+    # Claves esperadas: pixel_id, conversions_api_access_token, catalog_id,
+    # whatsapp_business_phone_id. Todas opcionales; vacío = integración apagada
+    # para esa marca (mismo patrón que GOOGLE_OAUTH_CLIENT_ID en el backend).
+    meta_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Configuración de Meta Business por marca. Claves disponibles: "
+            "pixel_id, conversions_api_access_token, catalog_id, "
+            "whatsapp_business_phone_id."
+        ),
+    )
+
     # Configuración completa de la landing page (copy, secciones, features, etc.)
     # Ver documentación en BRAND_PAGE_CONFIG_SCHEMA
     page_config = models.JSONField(

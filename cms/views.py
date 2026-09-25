@@ -16,4 +16,4 @@ class PageByBrandAndSlugAPIView(APIView):
         if not page:
             raise NotFound("Page not found")
 
-        return Response(PageSerializer(page).data)
+        return Response(PageSerializer(page, context={"request": request}).data)
