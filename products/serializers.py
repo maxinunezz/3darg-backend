@@ -43,6 +43,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "members_only",
             "member_discount_percent",
             "has_member_discount",
+            "bundle_discounts",
             "stock",
             "is_available",
             "is_featured",

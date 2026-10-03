@@ -86,7 +86,8 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         for it in items_data:
             product = products_by_id[it["product_id"]]
             qty = it["quantity"]
-            unit_price = product.price_for(user)  # aplica descuento de socio si corresponde
+            # aplica descuento de socio y, si corresponde, descuento por volumen (bundle_discounts)
+            unit_price = product.unit_price_for(user, qty)
             items_for_mp.append({
                 "title": product.name,
                 "quantity": qty,
@@ -115,7 +116,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 product=products_by_id[it["product_id"]],
                 product_name=products_by_id[it["product_id"]].name,
                 quantity=it["quantity"],
-                unit_price=products_by_id[it["product_id"]].price_for(user),
+                unit_price=products_by_id[it["product_id"]].unit_price_for(user, it["quantity"]),
             )
             for it in items_data
         ]

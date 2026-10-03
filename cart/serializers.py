@@ -7,8 +7,9 @@ from .models import Cart, CartItem
 
 class CartItemSerializer(serializers.ModelSerializer):
     product = ProductSerializer(read_only=True)
-    # Precio unitario y subtotal con el descuento de socio aplicado (el dueño del cart
-    # siempre está autenticado, así que paga member_price).
+    # Precio unitario y subtotal con descuento de socio + descuento por volumen
+    # (bundle_discounts) aplicados — unit_price_for() combina ambos (el dueño
+    # del cart siempre está autenticado, así que ya parte de member_price).
     unit_price = serializers.SerializerMethodField()
     subtotal = serializers.SerializerMethodField()
 
@@ -21,10 +22,10 @@ class CartItemSerializer(serializers.ModelSerializer):
         return getattr(request, "user", None)
 
     def get_unit_price(self, obj):
-        return obj.product.price_for(self._user())
+        return obj.product.unit_price_for(self._user(), obj.quantity)
 
     def get_subtotal(self, obj):
-        return obj.product.price_for(self._user()) * obj.quantity
+        return obj.product.unit_price_for(self._user(), obj.quantity) * obj.quantity
 
 
 class CartSerializer(serializers.ModelSerializer):
@@ -39,7 +40,7 @@ class CartSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         return sum(
-            (item.product.price_for(user) * item.quantity for item in obj.items.all()),
+            (item.product.unit_price_for(user, item.quantity) * item.quantity for item in obj.items.all()),
             Decimal("0"),
         )
 

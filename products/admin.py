@@ -31,6 +31,14 @@ class ProductAdmin(admin.ModelAdmin):
     fieldsets = (
         (None, {"fields": ("name", "slug", "sku", "description", "category", "brand")}),
         ("Precio y stock", {"fields": ("price", "stock", "is_available", "is_featured")}),
+        ("Descuento por volumen", {
+            "fields": ("bundle_discounts",),
+            "description": (
+                'Tramos de descuento por cantidad (mismo producto), ej: '
+                '[{"quantity": 2, "discount_percent": 10}, {"quantity": 3, "discount_percent": 15}]. '
+                "Vacío = no se muestra el selector de cantidad con descuento en el detalle del producto."
+            ),
+        }),
         ("Socios", {
             "fields": ("members_only", "member_discount_percent"),
             "description": (

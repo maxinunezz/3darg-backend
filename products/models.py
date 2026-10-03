@@ -99,6 +99,17 @@ class Product(models.Model):
         blank=True,
         help_text="ID del archivo en BamBuddy Library. Si está seteado, se envía a imprimir automáticamente al pagarse una orden.",
     )
+    bundle_discounts = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            'Descuento por volumen (mismo producto). Lista de tramos, ej: '
+            '[{"quantity": 2, "discount_percent": 10}, {"quantity": 3, "discount_percent": 15}]. '
+            "Vacío = sin oferta por cantidad (no se muestra el selector en el frontend). "
+            "El % se aplica sobre el precio ya resuelto (de lista o de socio) — se COMBINA con "
+            "member_discount_percent (no se elige el mejor de los dos), vía unit_price_for()."
+        ),
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -141,6 +152,36 @@ class Product(models.Model):
         if user and getattr(user, "is_authenticated", False):
             return self.member_price
         return self.price
+
+    def bundle_discount_percent_for(self, quantity: int) -> int:
+        """% de descuento por volumen aplicable a `quantity` unidades de este producto.
+
+        Toma el tramo de mayor cantidad que `quantity` todavía cubre (ej. tramos en
+        2 y 3 unidades, comprando 5 se aplica el de 3). Sin `bundle_discounts` → 0.
+        """
+        if not self.bundle_discounts:
+            return 0
+        applicable = [
+            int(tier.get("discount_percent", 0))
+            for tier in self.bundle_discounts
+            if quantity >= int(tier.get("quantity", 0))
+        ]
+        return max(applicable) if applicable else 0
+
+    def unit_price_for(self, user, quantity: int = 1) -> Decimal:
+        """Precio unitario efectivo para `user` llevándose `quantity` unidades.
+
+        Aplica primero `price_for(user)` (socio vs. anónimo) y, encima, el
+        descuento por volumen de `bundle_discounts` si corresponde — ambos
+        descuentos se combinan (no hay que elegir uno u otro). Fuente de verdad
+        del cobro cuando hay cantidad involucrada: la usan cart y checkout.
+        """
+        base = self.price_for(user)
+        bundle_pct = self.bundle_discount_percent_for(quantity)
+        if bundle_pct <= 0:
+            return base
+        factor = (Decimal(100) - Decimal(bundle_pct)) / Decimal(100)
+        return (base * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     def is_visible_to(self, user) -> bool:
         return (not self.members_only) or bool(user and getattr(user, "is_authenticated", False))
