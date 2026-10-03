@@ -12,3 +12,4 @@ requests>=2.31
 mercadopago>=2.2.0
 sentry-sdk[django]>=2.20
 google-auth>=2.34
+django-cloudinary-storage>=0.3

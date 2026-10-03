@@ -175,14 +175,31 @@ MEDIA_ROOT = BASE_DIR / "media"
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# --- Cloudinary (storage de imágenes de producto) ---
+# Vacío = sigue usando disco local (FileSystemStorage), igual patrón que
+# GOOGLE_OAUTH_CLIENT_ID: la integración se "prende" sola al cargar la env var,
+# sin tocar código. CLOUDINARY_URL tiene el formato:
+#   cloudinary://<api_key>:<api_secret>@<cloud_name>
+# La lee automáticamente el SDK de `cloudinary` desde el entorno.
+CLOUDINARY_URL = os.getenv("CLOUDINARY_URL", "")
+
 STORAGES = {
     "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "BACKEND": (
+            "cloudinary_storage.storage.MediaCloudinaryStorage"
+            if CLOUDINARY_URL
+            else "django.core.files.storage.FileSystemStorage"
+        ),
     },
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
+# Nota: `cloudinary_storage`/`cloudinary` NO están en INSTALLED_APPS a propósito.
+# Solo usamos la clase `cloudinary_storage.storage.MediaCloudinaryStorage` como
+# backend (importada por dotted path en STORAGES, sin necesidad de registrar la
+# app) — evita que `cloudinary_storage` pise el `collectstatic` de whitenoise
+# (su override para el widget de admin choca con el STORAGES nuevo de Django).
 
 # --- Auth ---
 AUTH_PASSWORD_VALIDATORS = [

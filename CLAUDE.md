@@ -166,7 +166,7 @@ El **frontend va a Vercel** (fuera de este repo). Este backend se despliega en u
 - `deploy/docker-compose.prod.yml`: `db` (Postgres 16) + `web` (build de este repo, código empaquetado en la imagen — **no** bind mount como en dev) + `caddy` (HTTPS automático + reverse proxy + sirve `media/` directo).
 - `deploy/Caddyfile`: config del reverse proxy/TLS.
 - `deploy/deploy.sh`: script de despliegue.
-- `deploy/backup-db.sh`, `deploy/reconcile-cron.sh`: mantenimiento programado.
+- `deploy/backup-db.sh` (pg_dump diario), `deploy/backup-media.sh` (tar.gz diario de `media/` — las imágenes de producto), `deploy/reconcile-cron.sh`: mantenimiento programado por cron (instalado por `deploy.sh`; ambos backups van a `deploy/backups/` con retención de 14 días). Guardan **en el mismo VPS** — para estar cubierto ante una falla de disco, copiar `deploy/backups/` periódicamente a otro lado (scp, S3, Backblaze).
 - Se corre desde `deploy/` (contexto de build `..`, o sea la raíz de este repo): `docker compose -f docker-compose.prod.yml up -d --build`.
 - Volúmenes persistentes: `postgres_data`, `caddy_data`, `caddy_config` — **no** `external: true` acá (a diferencia del compose de dev), porque en el VPS arrancan vacíos.
 

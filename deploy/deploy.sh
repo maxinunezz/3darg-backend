@@ -8,7 +8,7 @@
 #   3. Verifica que exista el .env de producción.
 #   4. Prepara la carpeta media/ con permisos correctos.
 #   5. Buildea y levanta el stack (db + web + caddy).
-#   6. Instala los cron: backup diario de la DB + reconciliación cada 15 min.
+#   6. Instala los cron: backup diario de DB + media + reconciliación cada 15 min.
 #
 # Cómo usarlo (en el VPS, como root o con sudo):
 #   git clone <URL-del-repo-3darg-backend> 3darg-backend
@@ -86,17 +86,18 @@ echo ""
 info "Estado de los contenedores:"
 ${COMPOSE} ps
 
-# --- 6. Cron: backup diario + reconciliación cada 15 min ---
-info "Instalando tareas cron (backup DB + reconciliación de pagos)..."
+# --- 6. Cron: backup diario (DB + media) + reconciliación cada 15 min ---
+info "Instalando tareas cron (backup DB + backup media + reconciliación de pagos)..."
 CRON_BACKUP="0 3 * * * ${SCRIPT_DIR}/backup-db.sh >> ${SCRIPT_DIR}/backup.log 2>&1"
+CRON_BACKUP_MEDIA="10 3 * * * ${SCRIPT_DIR}/backup-media.sh >> ${SCRIPT_DIR}/backup.log 2>&1"
 CRON_RECON="*/15 * * * * ${SCRIPT_DIR}/reconcile-cron.sh"
 
-chmod +x "${SCRIPT_DIR}/backup-db.sh" "${SCRIPT_DIR}/reconcile-cron.sh" 2>/dev/null || true
+chmod +x "${SCRIPT_DIR}/backup-db.sh" "${SCRIPT_DIR}/backup-media.sh" "${SCRIPT_DIR}/reconcile-cron.sh" 2>/dev/null || true
 
 # Reinstala las líneas sin duplicar (filtra las viejas por path del script).
-( crontab -l 2>/dev/null | grep -v "${SCRIPT_DIR}/backup-db.sh" | grep -v "${SCRIPT_DIR}/reconcile-cron.sh" ; \
-  echo "${CRON_BACKUP}" ; echo "${CRON_RECON}" ) | crontab -
-ok "Cron instalado (backup 03:00, reconciliación cada 15 min)."
+( crontab -l 2>/dev/null | grep -v "${SCRIPT_DIR}/backup-db.sh" | grep -v "${SCRIPT_DIR}/backup-media.sh" | grep -v "${SCRIPT_DIR}/reconcile-cron.sh" ; \
+  echo "${CRON_BACKUP}" ; echo "${CRON_BACKUP_MEDIA}" ; echo "${CRON_RECON}" ) | crontab -
+ok "Cron instalado (backup DB 03:00, backup media 03:10, reconciliación cada 15 min)."
 
 # --- Cierre ---
 cat <<EOF
@@ -124,8 +125,9 @@ Pasos que faltan (manuales, una sola vez):
   5. En Vercel, seteá NEXT_PUBLIC_BACKEND_URL=https://api.tudominio.com/api
 
 Comandos útiles:
-  Ver logs:        ${COMPOSE} logs -f
-  Reiniciar web:   ${COMPOSE} restart web
-  Backup manual:   ${SCRIPT_DIR}/backup-db.sh
+  Ver logs:              ${COMPOSE} logs -f
+  Reiniciar web:         ${COMPOSE} restart web
+  Backup DB manual:      ${SCRIPT_DIR}/backup-db.sh
+  Backup media manual:   ${SCRIPT_DIR}/backup-media.sh
 ============================================================
 EOF
