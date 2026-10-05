@@ -49,6 +49,7 @@ def handle_order_status_change(sender, instance, created, **kwargs):
     if paid_now:
         _decrement_stock(instance)
         _send_payment_email(instance)
+        _send_owner_notification_email(instance)
         _trigger_bambuddy_print(instance)
         _send_meta_purchase_event(instance)
     elif paid_undone:
@@ -211,3 +212,49 @@ def _send_payment_email(order):
         logger.info("Email de confirmación enviado a %s (orden %s)", order.customer_email, order.id)
     except Exception as e:
         logger.error("Error enviando email para orden %s: %s", order.id, e)
+
+
+def _resolve_owner_email(brand_slug: str) -> str:
+    """Destinatario del aviso interno de venta. Mismo patrón que
+    contact/views.py::_resolve_contact_email — cada marca puede tener su
+    propio destinatario vía <SLUG>_CONTACT_EMAIL (ej: LUMY_CONTACT_EMAIL)
+    en el .env; si no está seteada, cae al CONTACT_EMAIL global."""
+    if brand_slug:
+        env_key = f"{brand_slug.upper().replace('-', '_')}_CONTACT_EMAIL"
+        brand_email = os.getenv(env_key)
+        if brand_email:
+            return brand_email
+    return getattr(settings, "CONTACT_EMAIL", "3darg1@gmail.com")
+
+
+def _send_owner_notification_email(order):
+    """Avisa al dueño del negocio que entró una venta — hoy la única
+    confirmación que se mandaba era al cliente, el dueño no se enteraba
+    de nada salvo que entrara al admin a revisar."""
+    owner_email = _resolve_owner_email(order.brand.slug if order.brand_id else "")
+    if not owner_email:
+        return
+
+    items_lines = "\n".join(
+        f"  - {item.product_name} x{item.quantity} — {order.currency} {item.unit_price} c/u"
+        for item in order.order_items.all()
+    )
+    subject = f"Nueva venta — {order.brand.name} — {order.currency} {order.total_amount}"
+    message = (
+        f"Nueva venta confirmada en {order.brand.name}.\n\n"
+        f"Orden: {order.id}\n"
+        f"Cliente: {order.customer_email or '(sin email, compra de invitado)'}\n\n"
+        f"Productos:\n{items_lines}\n\n"
+        f"Total: {order.currency} {order.total_amount}\n"
+    )
+    try:
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [owner_email],
+            fail_silently=False,
+        )
+        logger.info("Aviso de venta enviado a %s (orden %s)", owner_email, order.id)
+    except Exception as e:
+        logger.error("Error enviando aviso de venta para orden %s: %s", order.id, e)
