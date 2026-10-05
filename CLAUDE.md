@@ -37,10 +37,10 @@ POSTGRES_DB=... POSTGRES_USER=... POSTGRES_PASSWORD=...
 POSTGRES_HOST=db                # nombre del servicio en docker-compose
 POSTGRES_PORT=5432
 
-EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend   # default: console
-EMAIL_HOST=smtp.gmail.com  EMAIL_PORT=587
-EMAIL_HOST_USER=...  EMAIL_HOST_PASSWORD=...
-DEFAULT_FROM_EMAIL="3DARG <noreply@3darg.com>"
+EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend   # OFF a propósito, ver abajo
+EMAIL_HOST=smtp.resend.com  EMAIL_PORT=587  EMAIL_HOST_USER=resend
+EMAIL_HOST_PASSWORD=...     # API key de Resend, vacío hasta activar
+DEFAULT_FROM_EMAIL="Lumy <noreply@lumy.com>"
 CONTACT_EMAIL=3darg1@gmail.com
 TELEGRAM_URL=https://t.me/3darg
 
@@ -55,6 +55,17 @@ GOOGLE_OAUTH_CLIENT_ID=...      # Client ID de Google Cloud Console (login "Cont
 ```
 
 El mismo `.env` es leído por los servicios `db` y `web` en `docker-compose.yml`.
+
+### Email — Resend (preparado, no activo)
+
+Proveedor elegido para el lanzamiento: **Resend** (SMTP relay), ya "cableado" en `settings.py`/`.env` con los defaults correctos (`smtp.resend.com`, usuario `resend`, `DEFAULT_FROM_EMAIL=Lumy <noreply@lumy.com>` — se eligió el dominio de Lumy y no `3darg.com` porque Lumy lanza primero y es el dominio que realmente se va a verificar). **`EMAIL_BACKEND` sigue en `console` a propósito** — no se activa hasta no tener DNS. Los tres puntos que mandan mail (`orders/signals.py`, `contact/views.py`, `vending/views.py`) ya están todos en `try/except`, así que activar/desactivar esto no rompe nada funcional, sean cuales sean sus logs.
+
+Pasos manuales pendientes para activar (no automatizables desde acá — requieren cuenta y acceso a DNS):
+1. Crear cuenta en resend.com (owner).
+2. Verificar el dominio `lumy.com` en Resend (agrega registros TXT/DKIM) — depende de tener acceso al DNS de `lumy.com`, todavía no disponible.
+3. Generar una API key en Resend y pegarla en `EMAIL_HOST_PASSWORD` (`.env`).
+4. Cambiar `EMAIL_BACKEND` a `django.core.mail.backends.smtp.EmailBackend`.
+5. `docker compose restart web`.
 
 ---
 
