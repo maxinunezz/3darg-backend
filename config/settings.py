@@ -126,6 +126,11 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "3DARG <noreply@3darg.com>"
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "3darg1@gmail.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "https://t.me/3darg")
 
+# Aviso de venta hacia presupuestos3d (admin de gestión). Si falta alguna, el signal
+# correspondiente es un no-op silencioso (ver orders/signals.py::_notify_presupuestos3d).
+PRESUPUESTOS3D_API_URL = os.getenv("PRESUPUESTOS3D_API_URL", "")
+PRESUPUESTOS3D_API_TOKEN = os.getenv("PRESUPUESTOS3D_API_TOKEN", "")
+
 # --- Media & Static ---
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"

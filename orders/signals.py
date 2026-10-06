@@ -1,4 +1,5 @@
 import logging
+import requests
 from django.db import transaction
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
@@ -43,6 +44,7 @@ def handle_order_status_change(sender, instance, created, **kwargs):
     if paid_now:
         _decrement_stock(instance)
         _send_payment_email(instance)
+        _notify_presupuestos3d(instance)
     elif paid_undone:
         _restore_stock(instance)
 
@@ -74,6 +76,42 @@ def _restore_stock(order):
                 "Stock restituido: product=%s qty=+%s stock_actual=%s",
                 product.slug, item.quantity, product.stock,
             )
+
+
+def _notify_presupuestos3d(order):
+    """Aviso de solo lectura hacia presupuestos3d. No descuenta stock ni crea nada
+    de este lado; no-op silencioso si faltan las env vars (ver settings.py)."""
+    api_url = settings.PRESUPUESTOS3D_API_URL
+    api_token = settings.PRESUPUESTOS3D_API_TOKEN
+    if not api_url or not api_token:
+        return
+
+    payload = {
+        "external_reference": order.external_reference,
+        "brand_slug": order.brand.slug,
+        "brand_name": order.brand.name,
+        "customer_email": order.customer_email,
+        "items": order.items,
+        "total_amount": str(order.total_amount),
+        "currency": order.currency,
+        "order_created_at": order.created_at.isoformat(),
+        "raw_payload": {
+            "order_id": str(order.id),
+            "status": order.status,
+        },
+    }
+
+    try:
+        response = requests.post(
+            api_url.rstrip("/") + "/api/pedidos-online/",
+            json=payload,
+            headers={"Authorization": f"Token {api_token}"},
+            timeout=5,
+        )
+        response.raise_for_status()
+        logger.info("Aviso enviado a presupuestos3d para orden %s", order.id)
+    except requests.RequestException as e:
+        logger.error("Error avisando a presupuestos3d para orden %s: %s", order.id, e)
 
 
 def _send_payment_email(order):
