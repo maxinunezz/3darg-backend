@@ -17,6 +17,7 @@ from products.models import Product
 from .models import MercadoPagoPayment
 from .serializers import CheckoutProCreateSerializer
 from .services.mercadopago import create_preference, get_payment, is_valid_webhook_signature
+from .services.reconciliation import apply_payment_status, reconcile_order
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,8 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        user = request.user if request.user.is_authenticated else None
+
         items_data = data["items"]
         product_ids = [it["product_id"] for it in items_data]
 
@@ -55,6 +58,14 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             return Response(
                 {"detail": f"Producto(s) no disponible(s): {missing}"},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Los productos members_only solo pueden comprarlos usuarios con cuenta.
+        members_only = [p.name for p in products_by_id.values() if p.members_only]
+        if members_only and user is None:
+            return Response(
+                {"detail": f"Necesitás una cuenta para comprar: {', '.join(members_only)}"},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         stock_errors = []
@@ -75,12 +86,14 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         for it in items_data:
             product = products_by_id[it["product_id"]]
             qty = it["quantity"]
+            # aplica descuento de socio y, si corresponde, descuento por volumen (bundle_discounts)
+            unit_price = product.unit_price_for(user, qty)
             items_for_mp.append({
                 "title": product.name,
                 "quantity": qty,
-                "unit_price": float(product.price),
+                "unit_price": float(unit_price),
             })
-            total += product.price * qty
+            total += unit_price * qty
 
         external_reference = uuid.uuid4().hex
 
@@ -103,7 +116,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 product=products_by_id[it["product_id"]],
                 product_name=products_by_id[it["product_id"]].name,
                 quantity=it["quantity"],
-                unit_price=products_by_id[it["product_id"]].price,
+                unit_price=products_by_id[it["product_id"]].unit_price_for(user, it["quantity"]),
             )
             for it in items_data
         ]
@@ -186,7 +199,6 @@ class MercadoPagoWebhookAPIView(APIView):
             logger.error("No se pudo verificar el pago %s en MP: %s", payment_id, e)
             return Response({"error": "MP API unreachable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        status_mp = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
 
         order = Order.objects.filter(external_reference=external_reference).first()
@@ -194,36 +206,57 @@ class MercadoPagoWebhookAPIView(APIView):
             logger.warning("Pago %s recibido pero orden %s no existe", payment_id, external_reference)
             return Response({"ok": True, "detail": "Order not found in DB"}, status=status.HTTP_200_OK)
 
-        if status_mp == "approved":
-            new_order_status = Order.Status.PAID
-            new_mp_status = MercadoPagoPayment.Status.APPROVED
-        elif status_mp in ["rejected", "cancelled"]:
-            new_order_status = Order.Status.REJECTED
-            new_mp_status = MercadoPagoPayment.Status.REJECTED
-        else:
-            new_order_status = order.status
-            new_mp_status = MercadoPagoPayment.Status.PENDING
-
-        mp_payment = MercadoPagoPayment.objects.filter(order=order).first()
-
-        if mp_payment and mp_payment.mp_payment_id == str(payment_id) and mp_payment.status == new_mp_status:
-            logger.info("Webhook duplicado ignorado: payment_id=%s status=%s", payment_id, new_mp_status)
-            return Response({"ok": True, "detail": "Already processed"}, status=status.HTTP_200_OK)
-
-        order.status = new_order_status
-        order.save()
-
-        if mp_payment:
-            mp_payment.status = new_mp_status
-            mp_payment.mp_payment_id = str(payment_id)
-            raw_data = mp_payment.raw or {}
-            raw_data["last_api_check"] = payment_info
-            mp_payment.raw = raw_data
-            mp_payment.save()
-
-        logger.info("Orden %s actualizada: status=%s mp_status=%s", order.id, new_order_status, new_mp_status)
+        # Toda la lógica de mapeo de estado + idempotencia + signal vive en el
+        # servicio de reconciliación (fuente de verdad compartida con la página
+        # de éxito y el cron).
+        apply_payment_status(order.id, payment_info)
 
         return Response({"ok": True}, status=status.HTTP_200_OK)
+
+
+class OrderReconcileAPIView(APIView):
+    """Reconcilia una orden contra MP y devuelve su estado real.
+
+    La llama la página de éxito cuando el cliente vuelve del checkout. Funciona
+    para invitados (AllowAny) porque no todas las compras tienen usuario. No
+    expone datos sensibles: solo lo necesario para mostrar el resultado.
+
+    A diferencia del webhook, no depende de que MP nos avise: consulta MP por
+    external_reference (search_payments) y sincroniza. Es la red que cubre el
+    caso "el webhook no llegó pero el cliente sí volvió".
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id)
+
+        try:
+            reconcile_order(order)
+        except Exception as e:
+            # Si MP no responde no rompemos la página de éxito: devolvemos el
+            # estado actual que tengamos en la DB.
+            logger.error("No se pudo reconciliar la orden %s: %s", order_id, e)
+
+        order.refresh_from_db()
+
+        return Response(
+            {
+                "order_id": str(order.id),
+                "status": order.status,
+                "status_display": order.get_status_display(),
+                "total_amount": str(order.total_amount),
+                "currency": order.currency,
+                "items": [
+                    {
+                        "title": item.product_name,
+                        "qty": item.quantity,
+                        "unit_price": str(item.unit_price),
+                    }
+                    for item in order.order_items.all()
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class PaymentSuccessView(TemplateView):

@@ -2,6 +2,7 @@ import os
 import hmac
 import hashlib
 import logging
+from urllib.parse import urlparse
 import mercadopago
 
 logger = logging.getLogger(__name__)
@@ -14,20 +15,30 @@ def get_mp_sdk():
     return mercadopago.SDK(token)
 
 
+def _is_local_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "0.0.0.0") or host.endswith(".local")
+
+
 def create_preference(*, items, external_reference, notification_url, back_urls):
     sdk = get_mp_sdk()
 
+    success_url = (back_urls.get("success") or "").strip()
     preference_data = {
         "items": items,
         "external_reference": str(external_reference).strip(),
         "notification_url": notification_url.strip(),
         "back_urls": {
-            "success": back_urls.get("success").strip(),
-            "failure": back_urls.get("failure").strip(),
-            "pending": back_urls.get("pending").strip(),
+            "success": success_url,
+            "failure": (back_urls.get("failure") or "").strip(),
+            "pending": (back_urls.get("pending") or "").strip(),
         },
-        "auto_return": "approved",
     }
+
+    # MercadoPago rechaza auto_return si back_urls.success no es pública (ej. localhost).
+    # En dev se omite para no romper la creación de la preferencia; en prod (dominio real) se activa.
+    if success_url and not _is_local_url(success_url):
+        preference_data["auto_return"] = "approved"
 
     result = sdk.preference().create(preference_data)
 
@@ -47,6 +58,26 @@ def get_payment(payment_id: str):
 
     logger.error("MP SDK error al buscar pago %s: %s", payment_id, result.get("response"))
     raise Exception("No se pudo obtener el pago de MP")
+
+
+def search_payments(external_reference: str):
+    """Busca en MP todos los pagos asociados a un external_reference.
+
+    Es la pieza que permite reconciliar SIN webhook: dada nuestra referencia
+    (que guardamos en la orden) recuperamos el/los pago(s) reales de MP.
+    Devuelve la lista de pagos (puede estar vacía si el cliente nunca pagó).
+    """
+    sdk = get_mp_sdk()
+    result = sdk.payment().search({"external_reference": str(external_reference).strip()})
+
+    if result["status"] == 200:
+        return result["response"].get("results", [])
+
+    logger.error(
+        "MP SDK error al buscar pagos por external_reference=%s: %s",
+        external_reference, result.get("response"),
+    )
+    raise Exception("No se pudieron buscar los pagos en MP")
 
 
 def is_valid_webhook_signature(request) -> bool:

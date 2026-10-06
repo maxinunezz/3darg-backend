@@ -1,0 +1,274 @@
+# CLAUDE.md — 3darg-backend
+
+API REST de 3DARG. Django 5 + DRF + PostgreSQL 16, expuesto en `:8000`. Sirve a la marca madre **3DARG** y a todas las **sub-marcas** (Lumy, MiniSlam, Print&Gym, CyberWeed, etc.). Frontend consumidor: `ecommerce-frontend/` (Next.js).
+
+> Contexto de negocio y reglas transversales: ver `../CLAUDE.md` (raíz del monorepo). Este archivo cubre solo el backend.
+
+---
+
+## Commands
+
+Desde la **raíz del monorepo** (`../`):
+
+```bash
+docker compose up -d                                  # arranca db + web (+ frontend)
+docker compose logs -f web                            # logs del backend
+docker compose build web && docker compose up -d      # rebuild tras tocar requirements.txt
+docker compose exec web python manage.py migrate
+docker compose exec web python manage.py makemigrations <app>
+docker compose exec -it web python manage.py createsuperuser
+docker compose exec web python manage.py shell
+```
+
+El contenedor `web` monta `./3darg-backend:/app` como bind, así que los cambios de código toman efecto al reiniciar gunicorn (`docker compose restart web`). **Solo hay que rebuildear si cambia `requirements.txt` o el `Dockerfile`.**
+
+No hay test suite real configurada (los `tests.py` están vacíos por defecto).
+
+---
+
+## Environment (`.env` en `3darg-backend/`)
+
+```
+DJANGO_SECRET_KEY=...
+DJANGO_DEBUG=1
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,web,.ngrok-free.app
+
+POSTGRES_DB=... POSTGRES_USER=... POSTGRES_PASSWORD=...
+POSTGRES_HOST=db                # nombre del servicio en docker-compose
+POSTGRES_PORT=5432
+
+EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend   # OFF a propósito, ver abajo
+EMAIL_HOST=smtp.resend.com  EMAIL_PORT=587  EMAIL_HOST_USER=resend
+EMAIL_HOST_PASSWORD=...     # API key de Resend, vacío hasta activar
+DEFAULT_FROM_EMAIL="Lumy <noreply@lumy.com>"
+CONTACT_EMAIL=3darg1@gmail.com
+TELEGRAM_URL=https://t.me/3darg
+
+MP_ACCESS_TOKEN=...             # MercadoPago — sin esto los pagos rompen
+MP_WEBHOOK_SECRET=...           # firma HMAC del webhook
+MP_NOTIFICATION_URL=https://<ngrok>/api/payments/mp/webhook/
+MP_CURRENCY=ARS
+FRONTEND_BASE_URL=http://localhost:3000   # usado para back_urls de MP
+
+GOOGLE_OAUTH_CLIENT_ID=...      # Client ID de Google Cloud Console (login "Continuar con Google")
+                                 # Vacío = /api/users/google/ responde 400 explicando que falta config
+```
+
+El mismo `.env` es leído por los servicios `db` y `web` en `docker-compose.yml`.
+
+### Email — Resend (preparado, no activo)
+
+Proveedor elegido para el lanzamiento: **Resend** (SMTP relay), ya "cableado" en `settings.py`/`.env` con los defaults correctos (`smtp.resend.com`, usuario `resend`, `DEFAULT_FROM_EMAIL=Lumy <noreply@lumy.com>` — se eligió el dominio de Lumy y no `3darg.com` porque Lumy lanza primero y es el dominio que realmente se va a verificar). **`EMAIL_BACKEND` sigue en `console` a propósito** — no se activa hasta no tener DNS. Los tres puntos que mandan mail (`orders/signals.py`, `contact/views.py`, `vending/views.py`) ya están todos en `try/except`, así que activar/desactivar esto no rompe nada funcional, sean cuales sean sus logs.
+
+Pasos manuales pendientes para activar (no automatizables desde acá — requieren cuenta y acceso a DNS):
+1. Crear cuenta en resend.com (owner).
+2. Verificar el dominio `lumy.com` en Resend (agrega registros TXT/DKIM) — depende de tener acceso al DNS de `lumy.com`, todavía no disponible.
+3. Generar una API key en Resend y pegarla en `EMAIL_HOST_PASSWORD` (`.env`).
+4. Cambiar `EMAIL_BACKEND` a `django.core.mail.backends.smtp.EmailBackend`.
+5. `docker compose restart web`.
+
+---
+
+## Stack
+
+| Pieza | Versión / detalle |
+|-------|-------------------|
+| Django | 5.x |
+| DRF | 3.15+ con SimpleJWT, django-filter |
+| DB | PostgreSQL 16 (`psycopg[binary]`) |
+| Server | gunicorn + whitenoise para estáticos del admin |
+| Pagos | `mercadopago` SDK (Checkout Pro) |
+| Idioma / TZ | `es-ar`, `America/Argentina/Buenos_Aires` |
+| Python | 3.12-slim (Dockerfile) |
+
+---
+
+## Apps y endpoints
+
+Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
+
+| App | Endpoint base | Endpoints clave |
+|-----|---------------|-----------------|
+| (auth JWT) | `/api/auth/` | `POST /token/`, `POST /token/refresh/` |
+| `users` | `/api/users/` | `POST /register/` (alta + opcional `brand_slug`), `POST /google/` (login/registro con Google ID token + opcional `brand_slug`), `GET\|PATCH /me/`, `GET\|POST /favorites/`, `DELETE /favorites/<product_id>/` |
+| `brands` | `/api/brands/` | `GET /` — lista de marcas **root** activas + sus `children` anidados recursivamente |
+| `products` | `/api/` | `GET /products/` (filtros: `?search=`, `?brand_slug=`, `?is_featured=`, `?is_available=`, `?category__slug=`), `GET /products/<slug>/`, `GET /categories/?brand_slug=` |
+| `cart` | `/api/cart/` | `GET\|DELETE /` (exigen `?brand_slug=`), `POST /items/` (exige `brand_slug` en el body), `PATCH\|DELETE /items/<id>/` — **todo requiere auth**. Sin `brand_slug` → 400 |
+| `orders` | `/api/orders/` | `GET /` (lista del usuario, filtrable por `?status=`), `GET /<uuid>/`, `GET /summary/` (totales + counts por status) |
+| `payments` | `/api/payments/` | `POST /mp/checkout-pro/`, `POST /mp/webhook/`, `GET /checkout/success/` (template HTML server-rendered) |
+| `cms` | `/api/cms/` | `GET /pages/<brand_slug>/<page_slug>/` |
+| `contact` | `/api/contact/` | `POST /` — manda email a `CONTACT_EMAIL` + confirmación al usuario (throttle 5/h por IP) |
+| `vending` | `/api/vending/` | `POST /leads/` — captura leads de la máquina expendedora (`AllowAny`, throttle 5/h por IP), manda mail a `CONTACT_EMAIL`. Consumido por la landing `/maquina-expendedora` del frontend |
+
+---
+
+## Modelos clave
+
+### `brands.Brand` (corazón del sistema)
+- **Jerarquía** vía `parent` (FK a `self`). 3DARG es el único root; las sub-marcas apuntan a él.
+- `brand_type`: `services | ecommerce | hybrid`. **`services` no permite checkout** — `payments` lo bloquea explícito.
+- `theme` (JSONField): CSS custom properties que el frontend inyecta en `[brand]/layout.tsx`.
+- `page_config` (JSONField): copy + secciones de la landing (`sections`, `hero_style`, `lifestyle_*`, `features`, `stats`, `newsletter_*`). El frontend lo consume tal cual.
+- `social_links` (JSONField): `{instagram, tiktok, web, ...}`.
+- `BrandLink`: items extra (Linktree, marketplace, etc.), serializados como `links`.
+
+### `users.User`
+- `AbstractUser` con `email` como `USERNAME_FIELD` (login con email, no username).
+- `registered_brand`: FK opcional a `Brand` — guarda **en qué marca se registró** el usuario (info, no scoping).
+- `Favorite`: `unique_together(user, product)`. Devuelve todos los favoritos del usuario; el filtrado por marca se hace en el frontend.
+
+### `products.Product`
+- `slug` único, autogenerado desde `name` en `save()` si está vacío.
+- FK opcional a `Brand` (productos sin marca existen, pero no se ven en `?brand_slug=`).
+- **`brand` se serializa como slug** (no ID) → `SlugRelatedField`. El frontend compara `product.brand === params.brand` directo.
+- `ProductImage` con `order`, accedida vía `images` (prefetcheada en list/detail).
+- **Productos para socios** (transversal a todas las marcas):
+  - `members_only` (bool): solo visible/comprable con cuenta. Filtrado por `Product.objects.visible_to(user)` (manager `ProductQuerySet`) en list y detail → 404 a anónimos.
+  - `member_discount_percent` (0–100): descuento para usuarios autenticados.
+  - **`price_for(user)` es la fuente de verdad del cobro** (anónimo `price`, socio `member_price`). La usan serializer (`final_price`), `cart` (subtotal/total) y `payments` (checkout). No replicar el cálculo de descuento en otro lado.
+  - El checkout bloquea con 403 que un anónimo compre `members_only`.
+  - El `CartSerializer` necesita `context={"request": request}` para resolver el precio de socio (ya pasado en `cart/views.py`).
+
+### `cart.Cart`
+- `ForeignKey(User, related_name="carts")` + `ForeignKey(Brand, related_name="carts")` **no nullable**, `unique_together(user, brand)` — **un carrito por (usuario, marca)**. Cada espacio de marca (3DARG incluida) tiene el suyo, aislado del resto.
+- `CartItem(cart, product, quantity)` con `unique_together(cart, product)`.
+- `get_or_create_cart(user, brand)` en `cart/views.py` recibe `brand` (objeto `Brand`) obligatorio — ya no hay overload sin marca. Las vistas resuelven `brand_slug` de `query_params` (GET/DELETE) o del body (POST `/items/`); si falta o no existe esa Brand → 400 en español.
+- Al agregar un item se valida que `product.brand` (si tiene) coincida con la `brand` del carrito — si no, 400 ("Este producto no pertenece a la marca actual").
+- Migración `cart/migrations/0003_cart_por_marca.py` + `0004_cart_por_marca_schema.py`: backfillean los `Cart` viejos con `brand=null` a la marca raíz (`slug="3darg"`) y fusionan duplicados por `(user, brand)` antes de aplicar el `unique_together`. Separadas en dos migraciones porque Postgres no permite `ALTER TABLE` en la misma transacción que el `RunPython` (pending trigger events).
+
+### `orders.Order`
+- **PK = UUID** (no integer). Las URLs usan `<uuid:id>`.
+- `status`: `DRAFT | PENDING | PAID | REJECTED | CANCELLED`.
+- `brand` con `on_delete=PROTECT` (no se puede borrar una marca con órdenes).
+- `user` puede ser `null` (`SET_NULL`) — checkout de guest está soportado en `payments`.
+- `external_reference`: UUID hex único, **es el ID que comparte con MercadoPago**. El webhook lo usa para matchear el pago.
+- `items` (JSONField): snapshot por si querés histórico; los items reales están en `OrderItem` (FK).
+- **Stock se descuenta vía signal**, no en el checkout. Ver abajo.
+
+### `payments.MercadoPagoPayment`
+- `OneToOne(Order)`. Guarda `preference_id`, `init_point`, `sandbox_init_point`, `mp_payment_id`, `status`, y `raw` (JSON con payloads/eventos crudos).
+
+### `cms.Page` / `cms.Section`
+- Sistema flexible de páginas por marca. `Section.data` (JSONField) tiene la config de cada sección. Por ahora poco usado — la mayoría del copy va en `Brand.page_config`.
+
+### `vending.VendingLead`
+- Modelo simple de captura de leads para la línea de negocio "máquina expendedora de impresión 3D" (todavía en validación, no es una sub-marca de ecommerce).
+- `segmento` (choices): `cotillon` (venta bajo pedido), `empresa` (máquina in-situ, impresión remota), `submarca` (uso interno del grupo: shopping, gimnasio, etc.), `alquiler` (marca privada, edición limitada), `otro`.
+- Sin auth (`AllowAny` + throttle `5/hour` por IP, igual patrón que `contact`). Al crear un lead, `VendingLeadAPIView.post()` manda mail a `CONTACT_EMAIL` con `fail_silently=True` (un fallo de email no rompe la captura del lead).
+- No tiene relación con `Brand`/`products` — es standalone, todavía no hay modelo de negocio ni pricing definido.
+
+---
+
+## Integración Meta Business (Pixel + Conversions API)
+
+`brands/services/meta_conversions.py::send_event()` — envía eventos server-side a Meta Conversions API usando `pixel_id` + `conversions_api_access_token` que cada `Brand` guarda en `meta_config` (JSONField). Mismo patrón que Google OAuth: si la marca no tiene `meta_config` cargado, la función es un no-op (`return False`), no rompe el flujo.
+
+- Se dispara desde `orders/signals.py` en la confirmación de pago (evento `Purchase`), con `event_id = order.external_reference` para que Meta deduplique contra el Pixel client-side que dispara el mismo evento en el frontend.
+- PII (`email`, `phone`) se hashea SHA256 antes de mandarse (`hash_user_data()`), como exige Meta.
+- **Nunca lanza excepción** — cualquier error de red/API se loguea (`logger.error`) y devuelve `False`; el pago sigue su curso igual.
+- `meta_config` también trae `catalog_id` y `whatsapp_business_phone_id`, reservados para integraciones futuras (catálogo de productos en Meta, WhatsApp Business) — hoy solo se usa `pixel_id`/`conversions_api_access_token`.
+
+---
+
+## Deploy en producción (`deploy/`)
+
+El **frontend va a Vercel** (fuera de este repo). Este backend se despliega en un **VPS propio** con su propio stack, separado del `docker-compose.yml` de desarrollo:
+
+- `deploy/docker-compose.prod.yml`: `db` (Postgres 16) + `web` (build de este repo, código empaquetado en la imagen — **no** bind mount como en dev) + `caddy` (HTTPS automático + reverse proxy + sirve `media/` directo).
+- `deploy/Caddyfile`: config del reverse proxy/TLS.
+- `deploy/deploy.sh`: script de despliegue.
+- `deploy/backup-db.sh` (pg_dump diario), `deploy/backup-media.sh` (tar.gz diario de `media/` — las imágenes de producto), `deploy/reconcile-cron.sh`: mantenimiento programado por cron (instalado por `deploy.sh`; ambos backups van a `deploy/backups/` con retención de 14 días). Guardan **en el mismo VPS** — para estar cubierto ante una falla de disco, copiar `deploy/backups/` periódicamente a otro lado (scp, S3, Backblaze).
+- Se corre desde `deploy/` (contexto de build `..`, o sea la raíz de este repo): `docker compose -f docker-compose.prod.yml up -d --build`.
+- Volúmenes persistentes: `postgres_data`, `caddy_data`, `caddy_config` — **no** `external: true` acá (a diferencia del compose de dev), porque en el VPS arrancan vacíos.
+
+---
+
+## Auth (JWT)
+
+- DRF default: `IsAuthenticatedOrReadOnly`. Las vistas que necesitan auth lo declaran explícito (`permissions.IsAuthenticated`).
+- Las vistas de pagos y contacto declaran `AllowAny` porque pueden invocarse sin sesión.
+- JWT: `ACCESS_TOKEN_LIFETIME=2h`, `REFRESH_TOKEN_LIFETIME=7d`, `ROTATE_REFRESH_TOKENS=True`.
+- Throttling: anónimos `10000/day`, usuarios `50000/day`. `contact` aplica un throttle adicional de `5/hour` por IP.
+- CORS: solo `http://localhost:3000` (cambiar en prod). CSRF acepta `*.ngrok-free.app` para los webhooks de MP en desarrollo.
+
+### Login con Google (`POST /api/users/google/`)
+
+- `AllowAny`. Recibe `{id_token, brand_slug?}`, verifica el token con `google.oauth2.id_token.verify_oauth2_token()` contra `settings.GOOGLE_OAUTH_CLIENT_ID` y exige `email_verified`.
+- `GoogleAuthSerializer` (`users/serializers.py`) hace **get_or_create por email** — mismo `User` unificado usado en todo el Grupo, no crea identidades separadas por marca. Si es un alta nueva: genera `username` único desde el email (`_generate_username`) y setea `registered_brand` con el `brand_slug` recibido (igual que `RegisterSerializer`).
+- Devuelve el mismo shape `{access, refresh}` que `/api/auth/token/` — el frontend no necesita lógica de sesión distinta.
+- Sin `GOOGLE_OAUTH_CLIENT_ID` configurado, el endpoint responde 400 con mensaje claro. Es el mecanismo por el que la feature queda "apagada" hasta configurar Google Cloud Console.
+
+---
+
+## Flujo de pagos (MercadoPago Checkout Pro)
+
+1. **`POST /api/payments/mp/checkout-pro/`** (`AllowAny`, transacción atómica):
+   - Valida `brand_slug`, que el brand no sea `services`, que cada producto exista, esté disponible y tenga stock.
+   - Crea `Order` en `PENDING` con `external_reference = uuid.uuid4().hex` y `OrderItem`s.
+   - Llama a `services.mercadopago.create_preference()` con `back_urls` apuntando a `FRONTEND_BASE_URL/checkout/{success|failure|pending}/?order_id=<uuid>`.
+   - Guarda `MercadoPagoPayment` y devuelve `init_point` (sandbox o real) al frontend.
+
+2. **`POST /api/payments/mp/webhook/`** (sin auth, lo invoca MP):
+   - Filtra topics: `payment`, `opened_dispute`, `dispute`. El resto se ignora con 200.
+   - **Valida firma HMAC** con `MP_WEBHOOK_SECRET` (`is_valid_webhook_signature`). Sin firma válida → 403.
+   - Consulta el pago a MP, matchea por `external_reference`, actualiza `Order.status` (`approved → PAID`, `rejected|cancelled → REJECTED`).
+   - **Idempotente**: si el `mp_payment_id` + `status` ya están guardados, devuelve 200 sin hacer nada.
+
+3. **`orders/signals.py`** (post-save de `Order`): cuando el status pasa a `PAID`:
+   - **Descuenta stock** de cada producto con `select_for_update()` (atomic).
+   - **Manda email** de confirmación a `customer_email`.
+   - Si vuelve de `PAID → REJECTED|CANCELLED`, **restituye stock**.
+   - El status se cachea en `pre_save` (`instance._old_status`) para detectar el cambio.
+
+> Si tocás `orders.Order.status`, **el signal corre**. No descontar stock manualmente desde otro lado.
+
+---
+
+## Brand scoping en el backend
+
+Para `users.Favorite` y `orders.Order` el backend **sigue sin imponer silos por marca a nivel de queryset** — devuelve toda la data del usuario, y el filtrado por marca (incluida 3DARG, que ya NO ve todo) lo hace el frontend. Eso significa:
+
+- `GET /api/users/favorites/` → **todos** los favoritos del usuario, sin filtrar.
+- `GET /api/orders/` → **todas** las órdenes del usuario, sin filtrar.
+- Los serializers de `Product` y `Order` exponen `brand` como **slug** (no ID) precisamente para que el frontend pueda filtrar con `.filter(p => p.brand === brandSlug)`. `/(main)/profile` filtra por `brand === "3darg" || brand == null` (igual criterio que `/[brand]/profile`, aplicado a la marca raíz).
+
+Donde sí hay scoping en backend:
+- `/api/products/?brand_slug=lumy` filtra por marca a nivel queryset.
+- Checkout exige `brand_slug` y valida que los productos pertenezcan a esa marca antes de cobrar.
+- **`cart` sí es un silo real en el backend** (a diferencia de favorites/orders): `Cart` es `unique_together(user, brand)` y todos sus endpoints exigen `brand_slug` — no hay forma de pedir "el carrito sin especificar marca". Ver `cart.Cart` arriba.
+
+---
+
+## Estáticos (admin de Django)
+
+`whitenoise` sirve los estáticos detrás de gunicorn. `start-server.sh` corre `collectstatic --noinput` al arrancar.
+
+Si el admin se ve sin estilos:
+1. Verificar que `WhiteNoiseMiddleware` esté **después** de `SecurityMiddleware` en `settings.MIDDLEWARE`.
+2. `STORAGES["staticfiles"]` debe ser `whitenoise.storage.CompressedManifestStaticFilesStorage`.
+3. Reiniciar `web` para que se re-ejecute `collectstatic`.
+
+`media/` se monta como volumen (`./3darg-backend/media:/app/media`) — los uploads sobreviven el rebuild del container.
+
+---
+
+## Convenciones
+
+- **Idioma del owner**: respuestas y comentarios en código en español. Strings del usuario final (mails, mensajes de error visibles) también en español.
+- **Serialización de FKs públicas** (`brand`, `category`): usar `SlugRelatedField(slug_field="slug")` en vez de IDs. El frontend compara contra slugs.
+- **Imágenes**: `ImageField` se serializa como URL absoluta. **No construir URLs manualmente** en serializers — DRF lo hace bien con `request` en contexto. El frontend usa `resolveMediaUrl()` para reescribir `web:8000` → `localhost:8000` cuando hace falta.
+- **DELETE devuelve 204 sin body**. No agregar `Response({...})` en `delete()` salvo que haya razón explícita.
+- **Cambios de status de Order**: pasan por el signal. No bypass salvo que sepas exactamente qué estás evitando (mails, stock).
+- **Transacciones atómicas** en checkout, descuento/restitución de stock y cualquier operación multi-tabla. Usar `@transaction.atomic` o `with transaction.atomic():`.
+- **Logging**: usar `logger = logging.getLogger(__name__)` y `logger.info/warning/error`. No `print`. Format definido en `LOGGING` (settings).
+- **Migraciones**: una por cambio lógico. Nombrar con `--name` cuando agregás un campo importante.
+
+---
+
+## Cosas a tener en cuenta
+
+- `REDME.md` (sic) en este directorio es un typo histórico. Ignorar o renombrar.
+- En producción: `DJANGO_DEBUG=0`, rotar `DJANGO_SECRET_KEY`, ajustar `CORS_ALLOWED_ORIGINS`, configurar SMTP real (default es `console`).
+- El webhook de MP requiere URL pública. En dev se usa **ngrok** (whitelisteado en `DJANGO_ALLOWED_HOSTS` y `CSRF_TRUSTED_ORIGINS`).
+- `volumes.postgres_data` está marcado como `external: true` en `docker-compose.yml` — el volumen es persistente y no se borra con `docker compose down -v`.
+- `Brand.parent` es `on_delete=PROTECT`: no se puede borrar 3DARG si tiene sub-marcas colgando.

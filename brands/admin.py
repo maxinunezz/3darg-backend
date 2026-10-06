@@ -43,10 +43,34 @@ class BrandAdmin(admin.ModelAdmin):
         ("Configuración de Landing Page (JSON)", {
             "description": (
                 "page_config controla el contenido y secciones de la página de la marca. "
-                "Claves: sections, features, stats, lifestyle_headline, lifestyle_subheadline, "
-                "lifestyle_cta, features_title, newsletter_title, newsletter_subtitle, newsletter_cta."
+                "Claves genéricas (landing estándar, la usan la mayoría de las marcas): sections, "
+                "features, stats, lifestyle_headline, lifestyle_subheadline, lifestyle_cta, "
+                "features_title, newsletter_title, newsletter_subtitle, newsletter_cta.<br><br>"
+                "Clave especial <code>lumy</code> (solo la usa la home a medida de Lumy, "
+                "slug=\"lumy\" — el resto de las marcas la ignora): objeto anidado con todo el copy "
+                "editable de esa home. Sub-claves: <code>nav_links</code> (array {href,label} del menú), "
+                "<code>hero</code> ({rail_top, rail_bottom, title_line1, title_line2, title_highlight, "
+                "title_line3, script_text, cta_primary_label, cta_secondary_label}), "
+                "<code>marquee_words</code> (array de strings), <code>proceso</code> ({eyebrow, "
+                "title_prefix, title_highlight, cta_label, steps: array {n,t,d,a}}), "
+                "<code>manifiesto</code> ({eyebrow_prefix, text — las stats van en el campo <code>stats</code> "
+                "de arriba, compartido con la landing genérica}), <code>tienda</code> ({title_prefix, "
+                "title_highlight, empty_text}), <code>inspiracion</code> ({eyebrow, title_prefix, "
+                "title_highlight, cta_label, items: array {label,tag,title}}), <code>cta_band</code> "
+                "({script, title_lines: array de líneas, subtitle, button_label}). "
+                "Todas las sub-claves son opcionales: lo que no se cargue usa el copy por defecto del código."
             ),
             "fields": ("page_config",),
+            "classes": ("collapse",),
+        }),
+        ("Integración Meta Business (JSON)", {
+            "description": (
+                "Claves: pixel_id (Meta Pixel de esta marca), catalog_id (Commerce Manager), "
+                "conversions_api_access_token (token server-side para Conversions API — "
+                "NUNCA se expone en la API pública, solo se usa desde el backend), "
+                "whatsapp_business_phone_id."
+            ),
+            "fields": ("meta_config",),
             "classes": ("collapse",),
         }),
     )

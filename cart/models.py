@@ -5,26 +5,29 @@ from brands.models import Brand
 
 
 class Cart(models.Model):
-    user = models.OneToOneField(
+    # Un carrito por (usuario, marca): cada espacio de marca (incluida 3DARG
+    # como marca madre) tiene su propio carrito, aislado del resto.
+    user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        related_name="cart",
+        related_name="carts",
         on_delete=models.CASCADE,
     )
     brand = models.ForeignKey(
         Brand,
         related_name="carts",
         on_delete=models.CASCADE,
-        null=True,
-        blank=True,
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("user", "brand")
 
     def total(self):
         return sum(item.subtotal() for item in self.items.all())
 
     def __str__(self):
-        return f"Cart de {self.user.email}"
+        return f"Cart de {self.user.email} ({self.brand.slug})"
 
 
 class CartItem(models.Model):

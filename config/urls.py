@@ -26,6 +26,9 @@ urlpatterns = [
 
     # Contacto
     path("api/contact/", include("contact.urls")),
+
+    # Máquina expendedora — landing de validación de mercado
+    path("api/vending/", include("vending.urls")),
 ]
 
 urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

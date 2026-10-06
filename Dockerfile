@@ -13,8 +13,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN useradd -m appuser
-USER appuser
 
-COPY . .
+COPY --chown=appuser:appuser . .
+
+USER appuser
 
 CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000"]

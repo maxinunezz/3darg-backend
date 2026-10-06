@@ -2,3 +2,6 @@
 .env
 .venv/
 __pycache__/
+
+# uploads (montados como volumen en docker-compose, no van en git)
+media/
