@@ -20,7 +20,12 @@ class ProductListAPIView(generics.ListAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
     search_fields = ["name", "description"]
-    filterset_fields = ["is_featured", "is_available", "category__slug"]
+    # "category__slug" NO va en filterset_fields a propósito: django-filter solo
+    # sabe hacer match exacto, y necesitamos que una categoría raíz con
+    # subcategorías (Cortantes, Rodillos Texturizadores) traiga también los
+    # productos de sus hijas (ver "Todos" más abajo) — se resuelve a mano en
+    # get_queryset().
+    filterset_fields = ["is_featured", "is_available"]
     ordering_fields = ["name", "price", "created_at"]
     ordering = ["name"]
 
@@ -34,6 +39,23 @@ class ProductListAPIView(generics.ListAPIView):
         brand_slug = self.request.query_params.get("brand_slug")
         if brand_slug:
             qs = qs.filter(brand__slug=brand_slug)
+
+        category_slug = self.request.query_params.get("category__slug")
+        if category_slug:
+            category = Category.objects.filter(slug=category_slug).first()
+            if category is None:
+                return qs.none()
+            if category.parent_id is None:
+                # Categoría raíz (ej: Cortantes) con subcategorías temáticas +
+                # "Todos"/"Sets" (ver products/admin.py::_GroupedCategoryIterator) —
+                # el link "Todos" del sidebar apunta acá (al slug de la raíz, no al
+                # de la subcategoría "Todos") y debe traer TODOS los productos de
+                # la raíz y de cada una de sus hijas, no solo los suyos propios
+                # (casi nunca hay productos colgados directo de la raíz).
+                category_ids = [category.id, *category.children.values_list("id", flat=True)]
+                qs = qs.filter(category_id__in=category_ids)
+            else:
+                qs = qs.filter(category_id=category.id)
         return qs
 
 

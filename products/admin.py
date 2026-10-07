@@ -1,6 +1,57 @@
 from django.contrib import admin
+from django.forms.models import ModelChoiceIterator
 from .models import Product, Category, ProductImage
 from mercadolibre.services import sync_product, MLSyncError
+
+
+class _GroupedCategoryIterator(ModelChoiceIterator):
+    """Agrupa el <select> de categoría del form de Product por categoría
+    raíz (ej: CORTANTES, RODILLOS TEXTURIZADORES), vía <optgroup> nativo de
+    Django (`Select.optgroups()` ya sabe renderizar choices anidados, no
+    hace falta tocar el widget) — mismo criterio visual que el sidebar de
+    categorías de la tienda (`[brand]/shop/page.tsx` en el frontend), que
+    también agrupa por categoría padre.
+
+    Dentro de cada grupo, "Todos" y "Sets" van primero (son las
+    subcategorías "genéricas", no atadas a un tema puntual) y el resto
+    queda alfabético. Una categoría raíz SIN subcategorías (ej: "shaker"
+    de Print&Gym) se lista suelta, sin agrupar.
+
+    La categoría raíz (ej: "CORTANTES") es solo el título visual del
+    grupo — un <optgroup> no es una <option>, así que no queda
+    seleccionable: los productos siempre cuelgan de una subcategoría
+    (temática, "Todos" o "Sets"), nunca de la raíz directamente.
+    """
+
+    PRIORIDAD = {"todos": 0, "sets": 1}
+
+    def __iter__(self):
+        if self.field.empty_label is not None:
+            yield ("", self.field.empty_label)
+
+        categorias = list(self.queryset)
+        hijas_por_padre = {}
+        for cat in categorias:
+            if cat.parent_id:
+                hijas_por_padre.setdefault(cat.parent_id, []).append(cat)
+
+        def orden(cat):
+            return (self.PRIORIDAD.get(cat.name.strip().lower(), 2), cat.name)
+
+        for cat in categorias:
+            if cat.parent_id:
+                continue  # se listan debajo de su padre, no sueltas
+            hijas = hijas_por_padre.get(cat.id)
+            if hijas:
+                yield (
+                    cat.name.upper(),
+                    [
+                        (self.field.prepare_value(h), self.field.label_from_instance(h))
+                        for h in sorted(hijas, key=orden)
+                    ],
+                )
+            else:
+                yield (self.field.prepare_value(cat), self.field.label_from_instance(cat))
 
 
 class ProductImageInline(admin.TabularInline):
@@ -37,6 +88,18 @@ class ProductAdmin(admin.ModelAdmin):
     readonly_fields = ["ml_item_id"]
     inlines = [ProductImageInline]
     actions = ["publicar_en_mercadolibre", "regenerar_sku"]
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        field = super().formfield_for_foreignkey(db_field, request, **kwargs)
+        if db_field.name == "category":
+            # Dropdown agrupado por categoría raíz (CORTANTES, RODILLOS
+            # TEXTURIZADORES, ...) — ver _GroupedCategoryIterator arriba.
+            # Nombre solo (sin "Padre > Hijo", eso ya lo dice el <optgroup>).
+            field.queryset = field.queryset.select_related("parent")
+            field.label_from_instance = lambda obj: obj.name
+            field.iterator = _GroupedCategoryIterator
+        return field
+
     fieldsets = (
         (None, {
             "fields": ("name", "slug", "sku", "description", "category", "brand"),
