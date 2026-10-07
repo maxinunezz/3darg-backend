@@ -13,6 +13,7 @@ class BrandAdmin(admin.ModelAdmin):
     list_display = (
         "name",
         "slug",
+        "sku_prefix",
         "brand_type",
         "parent",
         "is_active",
@@ -20,14 +21,14 @@ class BrandAdmin(admin.ModelAdmin):
         "navbar_order",
     )
     list_filter = ("brand_type", "is_active", "show_in_navbar", "parent")
-    search_fields = ("name", "slug", "slogan")
+    search_fields = ("name", "slug", "slogan", "sku_prefix")
     ordering = ("navbar_order", "name")
     prepopulated_fields = {"slug": ("name",)}
     
     # Organización del formulario de edición por secciones (Fieldsets)
     fieldsets = (
         ("Información Básica", {
-            "fields": ("parent", "name", "slug", "brand_type", "is_active")
+            "fields": ("parent", "name", "slug", "sku_prefix", "brand_type", "is_active")
         }),
         ("Navegación", {
             "fields": ("show_in_navbar", "navbar_order")

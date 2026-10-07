@@ -125,6 +125,13 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 ### `products.Product`
 - `slug` único, autogenerado desde `name` en `save()` si está vacío.
 - FK opcional a `Brand` (productos sin marca existen, pero no se ven en `?brand_slug=`).
+- **`sku`**: identificador único de catálogo, **compartido entre la web, el feed de Google/Meta, Mercado Libre y presupuestos3d** (se carga a mano ahí, ver `presupuestos3d/CLAUDE.md`). Formato `MARCA-CATEGORIA-NNNNNN[-VARIANTE]` (ej. `LUMY-COR-000037`, `MSL-ARO-000401-VERDE-M`), armado por `Product.generate_sku()`:
+  - `MARCA` = `Brand.sku_prefix` (código corto fijo por marca, ej. `LUMY`, `PYG`, `MSL`, `CYW`, `DRG` — cargado a mano en el admin, fallback al slug si está vacío).
+  - `CATEGORIA` = `Category.root_sku_prefix()`: código de la categoría **raíz** del producto (sube por `parent` hasta el nivel superior), no de la subcategoría puntual — así el SKU no se vuelve obsoleto si se reordenan subcategorías.
+  - `NNNNNN` = `Product.pk` con padding (ya es único y atómico, no hace falta un contador aparte).
+  - `VARIANTE` (opcional) = `color`/`size`, **solo informativos** (no son variantes con stock propio — eso requeriría un modelo de variantes que hoy no existe).
+  - **El SKU se genera una sola vez al crear el producto y después queda fijo** — no se recalcula solo si cambiás marca/categoría/color/tamaño más tarde (evita romper el matching con Mercado Libre o el historial del feed). Para actualizarlo a propósito: acción de admin *"Regenerar SKU"* sobre `Product` (`products/admin.py`).
+  - Migración `products/migrations/0018_regenerar_skus.py`: regeneró en lote los ~380 SKU existentes (antes puramente secuenciales, `3DARG-000037`) al formato nuevo — corrida una única vez, ventana elegida porque el campo no se usa en el frontend y casi nada estaba publicado todavía en Mercado Libre.
 - **`brand` se serializa como slug** (no ID) → `SlugRelatedField`. El frontend compara `product.brand === params.brand` directo.
 - `ProductImage` con `order`, accedida vía `images` (prefetcheada en list/detail). `channel` (`both|web|ml`) controla dónde se muestra cada foto — las marcadas `ml` quedan afuera de la web/el feed de Google-Meta (`WEB_IMAGES_PREFETCH` en `products/views.py`); `ml_order` permite un orden distinto al de la web en la publicación de Mercado Libre (vacío = mismo orden).
 - `ml_item_id`, `ml_category_id`, `weight_kg`/`length_cm`/`width_cm`/`height_cm`: datos para publicar en Mercado Libre, ver sección dedicada más abajo.

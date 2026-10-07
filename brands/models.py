@@ -26,6 +26,23 @@ class Brand(models.Model):
     name = models.CharField(max_length=120, unique=True)
     slug = models.SlugField(max_length=140, unique=True, blank=True)
 
+    # Código corto y FIJO para armar el SKU de los productos de esta marca
+    # (ej: "LUMY", "PYG"). A diferencia del slug, este código NO debería
+    # cambiar nunca una vez asignado — los SKU ya generados lo llevan
+    # "congelado" y se comparten con Mercado Libre, el feed de Google/Meta
+    # y presupuestos3d. Ver Product.generate_sku().
+    sku_prefix = models.CharField(
+        max_length=10,
+        blank=True,
+        help_text=(
+            "Código corto para el SKU de productos de esta marca (ej: LUMY, "
+            "PYG, MSL, CYW). Elegilo con cuidado: una vez que hay productos "
+            "usándolo no se debe cambiar (rompería el significado de los SKU "
+            "ya publicados en la web/Mercado Libre). Vacío = se usa el slug "
+            "en mayúsculas como fallback."
+        ),
+    )
+
     brand_type = models.CharField(
         max_length=20,
         choices=BRAND_TYPE_CHOICES,

@@ -41,6 +41,20 @@ class Category(models.Model):
             "Vacio = categoria de nivel superior."
         ),
     )
+    sku_prefix = models.CharField(
+        max_length=10,
+        blank=True,
+        help_text=(
+            "Código corto para el SKU de productos de esta categoría (ej: COR "
+            "para Cortantes, LLA para Llaveros). Solo hace falta cargarlo en "
+            "categorías de nivel superior (sin categoría padre) — las "
+            "subcategorías heredan el código de su raíz para no atar el SKU a "
+            "una subcategoría que puede reordenarse. Igual que "
+            "Brand.sku_prefix: evitar cambiarlo una vez que hay productos "
+            "usándolo. Vacío = se usan las primeras letras del slug como "
+            "fallback."
+        ),
+    )
 
     class Meta:
         ordering = ["name"]
@@ -51,6 +65,23 @@ class Category(models.Model):
             return f"{self.parent.name} > {self.name}"
         return self.name
 
+    def root_sku_prefix(self) -> str:
+        """Código de SKU de la categoría raíz de este árbol.
+
+        Sube por `parent` hasta la categoría de nivel superior y devuelve su
+        `sku_prefix` (o un fallback armado del slug si no está cargado), para
+        que el SKU no dependa de en qué subcategoría puntual quedó el
+        producto hoy.
+        """
+        node = self
+        seen = {node.pk}
+        while node.parent_id and node.parent_id not in seen:
+            node = node.parent
+            seen.add(node.pk)
+        if node.sku_prefix:
+            return node.sku_prefix
+        return slugify(node.slug).replace("-", "").upper()[:3] or "CAT"
+
 
 class Product(models.Model):
     name = models.CharField(max_length=200)
@@ -59,7 +90,35 @@ class Product(models.Model):
         max_length=64,
         unique=True,
         blank=True,
-        help_text="Identificador único de catálogo (feeds de Meta/Google). Se autogenera desde el ID si se deja vacío.",
+        help_text=(
+            "Identificador único de catálogo, compartido entre la web, el feed "
+            "de Google/Meta, Mercado Libre y presupuestos3d. Se autogenera con "
+            "el formato MARCA-CATEGORIA-NNNNNN[-VARIANTE] (ej: "
+            "LUMY-COR-000037 o MSL-ARO-000401-VERDE) a partir de la marca, la "
+            "categoría raíz del producto y color/tamaño si están cargados — "
+            "ver Product.generate_sku(). Una vez generado queda fijo: no se "
+            "recalcula solo si después cambiás la categoría o el color, "
+            "porque ya pudo haberse publicado en Mercado Libre o en el feed."
+        ),
+    )
+    color = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text=(
+            "Color del producto, solo informativo/descriptivo (no es una "
+            "variante con stock propio — para eso falta un modelo de "
+            "variantes que hoy no existe). Se usa para armar el SKU si está "
+            "cargado."
+        ),
+    )
+    size = models.CharField(
+        "Tamaño",
+        max_length=50,
+        blank=True,
+        help_text=(
+            "Tamaño del producto, solo informativo/descriptivo (mismo "
+            "criterio que color). Se usa para armar el SKU si está cargado."
+        ),
     )
     google_product_category = models.CharField(
         max_length=255,
@@ -154,11 +213,41 @@ class Product(models.Model):
         is_new = self._state.adding
         super().save(*args, **kwargs)
         if is_new and not self.sku:
-            self.sku = f"3DARG-{self.pk:06d}"
+            self.sku = self.generate_sku()
             super().save(update_fields=["sku"])
 
     def __str__(self):
         return self.name
+
+    def generate_sku(self) -> str:
+        """Arma el SKU MARCA-CATEGORIA-NNNNNN[-VARIANTE] a partir del estado
+        actual del producto (marca, categoría raíz, color/tamaño).
+
+        Se usa al crear el producto (ver `save()`) y también desde el
+        management command `regenerar_skus` para recalcular en lote. No se
+        llama solo en cada `save()` — el SKU, una vez asignado, queda fijo
+        aunque después cambien marca/categoría/color (ver help_text de `sku`).
+        """
+        if self.brand_id and self.brand.sku_prefix:
+            brand_code = self.brand.sku_prefix
+        elif self.brand_id:
+            brand_code = slugify(self.brand.slug).replace("-", "").upper()[:4] or "GEN"
+        else:
+            brand_code = "GEN"
+
+        category_code = self.category.root_sku_prefix() if self.category_id else "GEN"
+
+        base = f"{brand_code}-{category_code}-{self.pk:06d}"
+
+        variant_parts = []
+        for value in (self.color, self.size):
+            if value:
+                code = slugify(value).replace("-", "").upper()
+                if code:
+                    variant_parts.append(code)
+        if variant_parts:
+            base += "-" + "-".join(variant_parts)
+        return base
 
     @property
     def has_member_discount(self) -> bool:

@@ -11,9 +11,9 @@ class ProductImageInline(admin.TabularInline):
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ["id", "name", "slug", "brand", "parent"]
+    list_display = ["id", "name", "slug", "brand", "parent", "sku_prefix"]
     list_filter = ["brand", "parent"]
-    search_fields = ["name", "slug"]
+    search_fields = ["name", "slug", "sku_prefix"]
     prepopulated_fields = {"slug": ("name",)}
     autocomplete_fields = ["parent"]
 
@@ -26,13 +26,21 @@ class ProductAdmin(admin.ModelAdmin):
     ]
     list_filter = ["brand", "category", "members_only", "is_featured", "is_available"]
     list_editable = ["member_discount_percent", "members_only"]
-    search_fields = ["name", "description", "sku"]
+    search_fields = ["name", "description", "sku", "color", "size"]
     prepopulated_fields = {"slug": ("name",)}
     readonly_fields = ["sku", "ml_item_id"]
     inlines = [ProductImageInline]
-    actions = ["publicar_en_mercadolibre"]
+    actions = ["publicar_en_mercadolibre", "regenerar_sku"]
     fieldsets = (
         (None, {"fields": ("name", "slug", "sku", "description", "category", "brand")}),
+        ("Color y tamaño", {
+            "fields": ("color", "size"),
+            "description": (
+                "Solo informativo (no son variantes con stock propio). Si los "
+                "cargás, usá la acción \"Regenerar SKU\" de la lista para que "
+                "queden reflejados en el SKU — no se recalcula solo al guardar."
+            ),
+        }),
         ("Precio y stock", {"fields": ("price", "stock", "is_available", "is_featured")}),
         ("Descuento por volumen", {
             "fields": ("bundle_discounts",),
@@ -64,6 +72,29 @@ class ProductAdmin(admin.ModelAdmin):
             ),
         }),
     )
+
+    @admin.action(description="Regenerar SKU")
+    def regenerar_sku(self, request, queryset):
+        """Recalcula el SKU con Product.generate_sku() usando el estado
+        actual del producto (marca, categoría, color, tamaño).
+
+        El SKU no se recalcula solo en cada guardado a propósito (ver
+        help_text del campo) — esta acción es la forma explícita de
+        actualizarlo, por ejemplo después de cargar color/tamaño por primera
+        vez. Ojo: si el producto ya está publicado en Mercado Libre o en el
+        feed, cambiar el SKU ahí puede romper el matching/historial.
+        """
+        actualizados = 0
+        for product in queryset:
+            nuevo_sku = product.generate_sku()
+            if nuevo_sku != product.sku:
+                product.sku = nuevo_sku
+                product.save(update_fields=["sku"])
+                actualizados += 1
+        if actualizados:
+            self.message_user(request, f"{actualizados} SKU regenerado(s).")
+        else:
+            self.message_user(request, "Ningún SKU cambió (ya estaban al día).")
 
     @admin.action(description="Publicar/Actualizar en Mercado Libre")
     def publicar_en_mercadolibre(self, request, queryset):
