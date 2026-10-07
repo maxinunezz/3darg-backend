@@ -70,7 +70,9 @@ class CartItemAPIView(APIView):
         if error:
             return error
 
-        product = get_object_or_404(Product, id=data["product_id"], is_available=True)
+        product = get_object_or_404(
+            Product, id=data["product_id"], is_available=True, is_available_web=True
+        )
 
         # El producto tiene que pertenecer a la marca del carrito al que se
         # está agregando (o no tener marca asignada, caso productos genéricos).

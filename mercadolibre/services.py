@@ -210,15 +210,36 @@ def _build_payload(product):
     return payload
 
 
+ML_ACTIVE_STATUS = "active"
+
+
 def sync_product(product):
     """Crea o actualiza la publicación de `product` en Mercado Libre.
 
     Primera vez (sin ml_item_id): POST /items y guarda el id devuelto.
     Siguientes veces: PUT /items/{id} con los mismos datos (actualiza precio,
     stock, fotos, etc. de la publicación existente).
+
+    `is_available_ml` controla el canal ML por separado de la web: si está
+    apagado y el ítem ya existe, esta llamada lo PAUSA en vez de actualizarlo
+    (no se tocan precio/stock/fotos mientras esté pausado); si está apagado y
+    todavía no se publicó, no se puede publicar por primera vez así (tiene que
+    prenderse antes). Si está prendido y el ítem venía pausado, esta misma
+    llamada lo reactiva.
+
     Devuelve el ml_item_id. Lanza MLSyncError con mensaje en español ante
     cualquier problema (sin categoría, sin imágenes, rechazo de la API, etc.).
     """
+    if not product.is_available_ml:
+        if not product.ml_item_id:
+            raise MLSyncError(
+                "Este producto tiene desactivado el canal Mercado Libre "
+                "(is_available_ml) y todavía no se publicó — activalo antes "
+                "de publicarlo por primera vez."
+            )
+        _request("PUT", f"/items/{product.ml_item_id}", json={"status": "paused"})
+        return product.ml_item_id
+
     payload = _build_payload(product)
 
     if product.ml_item_id:
@@ -229,6 +250,8 @@ def sync_product(product):
             k: v for k, v in payload.items()
             if k not in ("family_name", "listing_type_id", "shipping")
         }
+        # Por si el ítem estaba pausado (is_available_ml se acaba de reactivar).
+        update_payload["status"] = ML_ACTIVE_STATUS
         _request("PUT", f"/items/{product.ml_item_id}", json=update_payload)
         item_id = product.ml_item_id
     else:
@@ -244,3 +267,33 @@ def sync_product(product):
     )
 
     return item_id
+
+
+def handle_item_notification(item_id):
+    """Procesa una notificación push de ML (topic=items, ver `views.webhook`).
+
+    No confía en el payload del webhook (ML no lo firma) — vuelve a pedir el
+    recurso por API con nuestro propio access_token y recién ahí decide. Si el
+    ítem ya no está activo (pausado, cerrado, eliminado, en revisión), apaga
+    `is_available_ml` del producto asociado para que el admin refleje la
+    realidad sin que alguien tenga que entrar a Mercado Libre a revisar a
+    mano; si volvió a estar activo (lo reactivaron directo en ML), lo prende
+    de nuevo. No hace nada si `item_id` no matchea ningún producto nuestro.
+    """
+    from products.models import Product  # import diferido: products no depende de mercadolibre
+
+    data = _request("GET", f"/items/{item_id}")
+    item_status = data.get("status")
+
+    product = Product.objects.filter(ml_item_id=item_id).first()
+    if not product:
+        return
+
+    should_be_available = item_status == ML_ACTIVE_STATUS
+    if product.is_available_ml != should_be_available:
+        product.is_available_ml = should_be_available
+        product.save(update_fields=["is_available_ml"])
+        logger.info(
+            "Producto %s (%s): is_available_ml -> %s (status ML=%s, vía webhook)",
+            product.pk, product.name, should_be_available, item_status,
+        )

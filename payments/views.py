@@ -50,6 +50,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             id__in=product_ids,
             brand=brand,
             is_available=True,
+            is_available_web=True,
         )
         products_by_id = {p.id: p for p in products_qs}
 

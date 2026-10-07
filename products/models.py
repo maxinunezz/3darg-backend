@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.core.validators import MaxValueValidator
@@ -94,13 +95,15 @@ class Product(models.Model):
             "Identificador único de catálogo, compartido entre la web, el feed "
             "de Google/Meta, Mercado Libre y presupuestos3d. Se autogenera con "
             "el formato MARCA-CATEGORIA[-ID_SUBCATEGORIA]-NNNNNN[-VARIANTE] (ej: "
-            "LUMY-COR-000037, LUMY-COR-04-000037 si la subcategoría tiene código "
+            "LUMY-COR-000037, LUMY-COR-04-000001 si la subcategoría tiene código "
             "propio cargado, o MSL-ARO-000401-VERDE) a partir de la marca, la "
             "categoría raíz del producto, el código propio de la subcategoría si "
             "está cargado y color/tamaño si están cargados — ver "
-            "Product.generate_sku(). Una vez generado queda fijo: no se "
-            "recalcula solo si después cambiás la categoría o el color, "
-            "porque ya pudo haberse publicado en Mercado Libre o en el feed."
+            "Product.generate_sku(). Con subcategoría, NNNNNN es un contador "
+            "local a esa subcategoría (1, 2, 3...); sin subcategoría, es el pk "
+            "global del producto. Una vez generado queda fijo: no se recalcula "
+            "solo si después cambiás la categoría o el color, porque ya pudo "
+            "haberse publicado en Mercado Libre o en el feed."
         ),
     )
     color = models.CharField(
@@ -135,6 +138,27 @@ class Product(models.Model):
     stock = models.PositiveIntegerField(default=0)
     is_available = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
+    is_available_web = models.BooleanField(
+        default=True,
+        help_text=(
+            "Habilita/deshabilita este producto puntualmente en la web (y el "
+            "feed de Google/Meta), sin tocar su publicación en Mercado "
+            "Libre. Además de esto tiene que estar activo 'is_available' "
+            "(el apagado general)."
+        ),
+    )
+    is_available_ml = models.BooleanField(
+        default=True,
+        help_text=(
+            "Habilita/deshabilita este producto puntualmente en Mercado "
+            "Libre, sin tocar la web. Desactivarlo pausa la publicación la "
+            "próxima vez que corras la acción 'Publicar/Actualizar en "
+            "Mercado Libre'; reactivarlo la vuelve a poner activa. También "
+            "se apaga solo cuando Mercado Libre avisa (webhook) que el ítem "
+            "ya no está activo (pausado, cerrado, eliminado) — ver "
+            "mercadolibre/services.py::handle_item_notification()."
+        ),
+    )
     members_only = models.BooleanField(
         default=False,
         help_text="Si está activo, el producto solo es visible y comprable por usuarios con cuenta.",
@@ -226,10 +250,23 @@ class Product(models.Model):
         partir del estado actual del producto (marca, categoría raíz,
         subcategoría, color/tamaño).
 
-        Se usa al crear el producto (ver `save()`) y también desde el
-        management command `regenerar_skus` para recalcular en lote. No se
-        llama solo en cada `save()` — el SKU, una vez asignado, queda fijo
-        aunque después cambien marca/categoría/color (ver help_text de `sku`).
+        NNNNNN: si la categoría es una subcategoría con `sku_prefix` propio
+        (ej: "04" en Cortantes > Animales de la Selva), es un CONTADOR LOCAL
+        a esa subcategoría (1, 2, 3...), no el pk global del producto — así
+        una subcategoría chica (ej: Navidad) no termina con números de 3
+        cifras que no dicen nada sobre esa colección puntual. Si la
+        categoría no tiene subcategoría con código propio, se sigue usando
+        el pk global (comportamiento histórico, sin tocar — ver nota abajo).
+
+        Ojo: este cambio de numeración rige desde que se agregó (no se
+        regeneran retroactivamente los SKU ya asignados antes, para no
+        romper publicaciones ya hechas en Mercado Libre/el feed — ver
+        help_text de `sku`).
+
+        Se usa al crear el producto (ver `save()`) y también desde la acción
+        de admin "Regenerar SKU"/el management command `regenerar_skus` para
+        recalcular a pedido. No se llama solo en cada `save()` — el SKU, una
+        vez asignado, queda fijo aunque después cambien marca/categoría/color.
         """
         if self.brand_id and self.brand.sku_prefix:
             brand_code = self.brand.sku_prefix
@@ -244,11 +281,18 @@ class Product(models.Model):
 
         # Si el producto está en una subcategoría (no la raíz) y esa
         # subcategoría tiene su propio código cargado (ej: "04" en Cortantes
-        # > Animales de la Selva), se suma como segmento extra del SKU.
-        if self.category_id and self.category.parent_id and self.category.sku_prefix:
+        # > Animales de la Selva), se suma como segmento extra del SKU y el
+        # número pasa a ser un contador local a esa subcategoría.
+        tiene_subcategoria = bool(
+            self.category_id and self.category.parent_id and self.category.sku_prefix
+        )
+        if tiene_subcategoria:
             base += f"-{self.category.sku_prefix}"
+            numero = self._next_subcategory_sku_number(base)
+        else:
+            numero = self.pk
 
-        base += f"-{self.pk:06d}"
+        base += f"-{numero:06d}"
 
         variant_parts = []
         for value in (self.color, self.size):
@@ -259,6 +303,25 @@ class Product(models.Model):
         if variant_parts:
             base += "-" + "-".join(variant_parts)
         return base
+
+    def _next_subcategory_sku_number(self, prefix: str) -> int:
+        """Próximo número libre dentro de `prefix` (ej: "LUMY-COR-45") entre
+        los SKU ya asignados en la MISMA categoría de este producto.
+
+        Toma el máximo ya usado (no solo cuenta productos) para no repetir
+        un número si se borró alguno en el medio."""
+        pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)")
+        maximo = 0
+        skus = (
+            Product.objects.filter(category_id=self.category_id)
+            .exclude(pk=self.pk)
+            .values_list("sku", flat=True)
+        )
+        for sku in skus:
+            match = pattern.match(sku)
+            if match:
+                maximo = max(maximo, int(match.group(1)))
+        return maximo + 1
 
     @property
     def has_member_discount(self) -> bool:

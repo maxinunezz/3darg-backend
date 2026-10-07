@@ -27,6 +27,7 @@ class ProductListAPIView(generics.ListAPIView):
     def get_queryset(self):
         qs = (
             Product.objects.visible_to(self.request.user)
+            .filter(is_available_web=True)
             .prefetch_related(WEB_IMAGES_PREFETCH)
             .select_related("category", "brand")
         )
@@ -42,9 +43,12 @@ class ProductDetailAPIView(generics.RetrieveAPIView):
     lookup_field = "slug"
 
     def get_queryset(self):
-        # Los productos members_only devuelven 404 a anónimos (no se filtran al frontend).
+        # Los productos members_only devuelven 404 a anónimos (no se filtran al
+        # frontend). Los apagados puntualmente en el canal web (is_available_web)
+        # también devuelven 404 — mismo criterio.
         return (
             Product.objects.visible_to(self.request.user)
+            .filter(is_available_web=True)
             .prefetch_related(WEB_IMAGES_PREFETCH)
             .select_related("category", "brand")
         )
@@ -74,8 +78,10 @@ class ProductFeedAPIView(APIView):
     no requiere push desde nuestro lado. Se registra una vez por marca en
     Commerce Manager → Catálogo → Fuentes de datos → Programado.
 
-    Solo incluye productos públicos: `is_available=True` y `members_only=False`
-    (un producto de socios no es una landing válida para tráfico anónimo pago).
+    Solo incluye productos públicos: `is_available=True`, `is_available_web=True`
+    y `members_only=False` (un producto de socios no es una landing válida para
+    tráfico anónimo pago; uno apagado puntualmente en el canal web tampoco
+    debería traer tráfico pago a una página que ya no se muestra).
     """
 
     permission_classes = [AllowAny]
@@ -87,6 +93,7 @@ class ProductFeedAPIView(APIView):
             Product.objects.filter(
                 brand=brand,
                 is_available=True,
+                is_available_web=True,
                 members_only=False,
             )
             .prefetch_related(WEB_IMAGES_PREFETCH)

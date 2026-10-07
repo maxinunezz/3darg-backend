@@ -1,3 +1,4 @@
+import json
 import logging
 from urllib.parse import urlencode
 
@@ -5,11 +6,13 @@ import requests
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
-from django.http import HttpResponseBadRequest
+from django.http import HttpResponseBadRequest, JsonResponse
 from django.shortcuts import redirect
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 
 from .models import MLCredentials
+from .services import MLSyncError, handle_item_notification
 
 logger = logging.getLogger(__name__)
 
@@ -68,3 +71,40 @@ def callback(request):
 
     messages.success(request, "Cuenta de Mercado Libre conectada correctamente.")
     return redirect("admin:mercadolibre_mlcredentials_changelist")
+
+
+@csrf_exempt
+def webhook(request):
+    """Recibe notificaciones push de Mercado Libre (topic `items`) para
+    enterarnos cuando un ítem cambia de estado (pausado, cerrado, eliminado,
+    reactivado) sin depender de que alguien entre al admin a revisar a mano.
+
+    Hay que registrar esta URL (pública, ej. vía ngrok en dev) en el panel de
+    la app en Mercado Libre Developers → Notificaciones, suscripta al menos
+    al tópico `items`. A diferencia del webhook de MercadoPago, ML no firma
+    el payload — por eso no se usa el `resource`/`status` que viene en el
+    body para decidir nada, solo para saber qué ítem volver a consultar por
+    API (ver `services.handle_item_notification`).
+    """
+    if request.method != "POST":
+        return HttpResponseBadRequest("Método no permitido")
+
+    try:
+        payload = json.loads(request.body or b"{}")
+    except ValueError:
+        return HttpResponseBadRequest("JSON inválido")
+
+    topic = payload.get("topic")
+    resource = payload.get("resource", "")
+
+    logger.info("Webhook ML recibido: topic=%s resource=%s", topic, resource)
+
+    if topic == "items" and resource.startswith("/items/"):
+        item_id = resource.rsplit("/", 1)[-1]
+        try:
+            handle_item_notification(item_id)
+        except MLSyncError as exc:
+            logger.error("No se pudo procesar notificación ML de %s: %s", item_id, exc)
+
+    # ML solo necesita un 200 para no reintentar — no importa el body.
+    return JsonResponse({"ok": True})

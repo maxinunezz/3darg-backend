@@ -22,17 +22,29 @@ class CategoryAdmin(admin.ModelAdmin):
 class ProductAdmin(admin.ModelAdmin):
     list_display = [
         "name", "brand", "sku", "price", "member_discount_percent", "members_only",
-        "stock", "is_available", "is_featured",
+        "stock", "is_available", "is_available_web", "is_available_ml", "is_featured",
     ]
-    list_filter = ["brand", "category", "members_only", "is_featured", "is_available"]
-    list_editable = ["member_discount_percent", "members_only"]
+    list_filter = [
+        "brand", "category", "members_only", "is_featured",
+        "is_available", "is_available_web", "is_available_ml",
+    ]
+    list_editable = ["member_discount_percent", "members_only", "is_available_web", "is_available_ml"]
     search_fields = ["name", "description", "sku", "color", "size"]
     prepopulated_fields = {"slug": ("name",)}
-    readonly_fields = ["sku", "ml_item_id"]
+    readonly_fields = ["ml_item_id"]
     inlines = [ProductImageInline]
     actions = ["publicar_en_mercadolibre", "regenerar_sku"]
     fieldsets = (
-        (None, {"fields": ("name", "slug", "sku", "description", "category", "brand")}),
+        (None, {
+            "fields": ("name", "slug", "sku", "description", "category", "brand"),
+            "description": (
+                "El SKU se precarga solo al crear el producto (Product.generate_sku()), "
+                "pero el campo queda editable por si hace falta corregirlo a mano "
+                "(ej: typo, migración de un código viejo, etc.) — ver el help text "
+                "del campo para el formato esperado. Guardalo dejándolo vacío para que "
+                "se regenere automáticamente al crear el producto."
+            ),
+        }),
         ("Color y tamaño", {
             "fields": ("color", "size"),
             "description": (
@@ -42,6 +54,20 @@ class ProductAdmin(admin.ModelAdmin):
             ),
         }),
         ("Precio y stock", {"fields": ("price", "stock", "is_available", "is_featured")}),
+        ("Canales de venta", {
+            "fields": ("is_available_web", "is_available_ml"),
+            "description": (
+                "Prender/apagar este producto en cada canal por separado, sin "
+                "afectar a los demás (ej: pausarlo en Mercado Libre pero "
+                "dejarlo visible en la web, o al revés). 'is_available' (arriba) "
+                "sigue siendo el apagado general: si está apagado, no se vende "
+                "en ningún lado sin importar estos dos. Mercado Libre: después "
+                "de cambiar is_available_ml corré la acción \"Publicar/Actualizar "
+                "en Mercado Libre\" para que el pausado/reactivado se refleje "
+                "ahí — no es automático. También se apaga solo cuando Mercado "
+                "Libre nos avisa (webhook) que el ítem ya no está activo."
+            ),
+        }),
         ("Descuento por volumen", {
             "fields": ("bundle_discounts",),
             "description": (
