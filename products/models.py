@@ -93,10 +93,12 @@ class Product(models.Model):
         help_text=(
             "Identificador único de catálogo, compartido entre la web, el feed "
             "de Google/Meta, Mercado Libre y presupuestos3d. Se autogenera con "
-            "el formato MARCA-CATEGORIA-NNNNNN[-VARIANTE] (ej: "
-            "LUMY-COR-000037 o MSL-ARO-000401-VERDE) a partir de la marca, la "
-            "categoría raíz del producto y color/tamaño si están cargados — "
-            "ver Product.generate_sku(). Una vez generado queda fijo: no se "
+            "el formato MARCA-CATEGORIA[-ID_SUBCATEGORIA]-NNNNNN[-VARIANTE] (ej: "
+            "LUMY-COR-000037, LUMY-COR-04-000037 si la subcategoría tiene código "
+            "propio cargado, o MSL-ARO-000401-VERDE) a partir de la marca, la "
+            "categoría raíz del producto, el código propio de la subcategoría si "
+            "está cargado y color/tamaño si están cargados — ver "
+            "Product.generate_sku(). Una vez generado queda fijo: no se "
             "recalcula solo si después cambiás la categoría o el color, "
             "porque ya pudo haberse publicado en Mercado Libre o en el feed."
         ),
@@ -220,8 +222,9 @@ class Product(models.Model):
         return self.name
 
     def generate_sku(self) -> str:
-        """Arma el SKU MARCA-CATEGORIA-NNNNNN[-VARIANTE] a partir del estado
-        actual del producto (marca, categoría raíz, color/tamaño).
+        """Arma el SKU MARCA-CATEGORIA[-ID_SUBCATEGORIA]-NNNNNN[-VARIANTE] a
+        partir del estado actual del producto (marca, categoría raíz,
+        subcategoría, color/tamaño).
 
         Se usa al crear el producto (ver `save()`) y también desde el
         management command `regenerar_skus` para recalcular en lote. No se
@@ -237,7 +240,15 @@ class Product(models.Model):
 
         category_code = self.category.root_sku_prefix() if self.category_id else "GEN"
 
-        base = f"{brand_code}-{category_code}-{self.pk:06d}"
+        base = f"{brand_code}-{category_code}"
+
+        # Si el producto está en una subcategoría (no la raíz) y esa
+        # subcategoría tiene su propio código cargado (ej: "04" en Cortantes
+        # > Animales de la Selva), se suma como segmento extra del SKU.
+        if self.category_id and self.category.parent_id and self.category.sku_prefix:
+            base += f"-{self.category.sku_prefix}"
+
+        base += f"-{self.pk:06d}"
 
         variant_parts = []
         for value in (self.color, self.size):
