@@ -28,7 +28,7 @@ class CartAPITests(APITestCase):
         self.client.force_authenticate(user=self.user)
 
     def test_get_empty_cart(self):
-        res = self.client.get(reverse("cart"))
+        res = self.client.get(reverse("cart"), {"brand_slug": self.brand.slug})
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(len(res.data["items"]), 0)
 
@@ -36,24 +36,25 @@ class CartAPITests(APITestCase):
         res = self.client.post(reverse("cart-item-add"), {
             "product_id": self.product.id,
             "quantity": 2,
+            "brand_slug": self.brand.slug,
         })
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(len(res.data["items"]), 1)
         self.assertEqual(res.data["items"][0]["quantity"], 2)
 
     def test_remove_item(self):
-        cart = Cart.objects.create(user=self.user)
+        cart = Cart.objects.create(user=self.user, brand=self.brand)
         item = CartItem.objects.create(cart=cart, product=self.product, quantity=1)
         res = self.client.delete(reverse("cart-item-detail", kwargs={"item_id": item.id}))
         self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
 
     def test_clear_cart(self):
-        cart = Cart.objects.create(user=self.user)
+        cart = Cart.objects.create(user=self.user, brand=self.brand)
         CartItem.objects.create(cart=cart, product=self.product, quantity=1)
-        res = self.client.delete(reverse("cart"))
+        res = self.client.delete(f"{reverse('cart')}?brand_slug={self.brand.slug}")
         self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
 
     def test_requires_auth(self):
         self.client.force_authenticate(user=None)
-        res = self.client.get(reverse("cart"))
+        res = self.client.get(reverse("cart"), {"brand_slug": self.brand.slug})
         self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
