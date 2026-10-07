@@ -29,6 +29,9 @@ urlpatterns = [
 
     # Máquina expendedora — landing de validación de mercado
     path("api/vending/", include("vending.urls")),
+
+    # Mercado Libre — handshake OAuth (alta/renovación de credenciales)
+    path("api/mercadolibre/", include("mercadolibre.urls")),
 ]
 
 urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

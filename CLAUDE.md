@@ -52,6 +52,8 @@ FRONTEND_BASE_URL=http://localhost:3000   # usado para back_urls de MP
 
 GOOGLE_OAUTH_CLIENT_ID=...      # Client ID de Google Cloud Console (login "Continuar con Google")
                                  # Vacío = /api/users/google/ responde 400 explicando que falta config
+
+ML_CLIENT_ID=...  ML_CLIENT_SECRET=...  ML_REDIRECT_URI=...  ML_SITE_ID=MLA   # Mercado Libre, ver sección dedicada
 ```
 
 El mismo `.env` es leído por los servicios `db` y `web` en `docker-compose.yml`.
@@ -99,6 +101,7 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 | `cms` | `/api/cms/` | `GET /pages/<brand_slug>/<page_slug>/` |
 | `contact` | `/api/contact/` | `POST /` — manda email a `CONTACT_EMAIL` + confirmación al usuario (throttle 5/h por IP) |
 | `vending` | `/api/vending/` | `POST /leads/` — captura leads de la máquina expendedora (`AllowAny`, throttle 5/h por IP), manda mail a `CONTACT_EMAIL`. Consumido por la landing `/maquina-expendedora` del frontend |
+| `mercadolibre` | `/api/mercadolibre/` | `GET /authorize/`, `GET /callback/` — handshake OAuth para conectar la cuenta de vendedor (ver sección dedicada) |
 
 ---
 
@@ -121,7 +124,8 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 - `slug` único, autogenerado desde `name` en `save()` si está vacío.
 - FK opcional a `Brand` (productos sin marca existen, pero no se ven en `?brand_slug=`).
 - **`brand` se serializa como slug** (no ID) → `SlugRelatedField`. El frontend compara `product.brand === params.brand` directo.
-- `ProductImage` con `order`, accedida vía `images` (prefetcheada en list/detail).
+- `ProductImage` con `order`, accedida vía `images` (prefetcheada en list/detail). `channel` (`both|web|ml`) controla dónde se muestra cada foto — las marcadas `ml` quedan afuera de la web/el feed de Google-Meta (`WEB_IMAGES_PREFETCH` en `products/views.py`); `ml_order` permite un orden distinto al de la web en la publicación de Mercado Libre (vacío = mismo orden).
+- `ml_item_id`, `ml_category_id`, `weight_kg`/`length_cm`/`width_cm`/`height_cm`: datos para publicar en Mercado Libre, ver sección dedicada más abajo.
 - **Productos para socios** (transversal a todas las marcas):
   - `members_only` (bool): solo visible/comprable con cuenta. Filtrado por `Product.objects.visible_to(user)` (manager `ProductQuerySet`) en list y detail → 404 a anónimos.
   - `member_discount_percent` (0–100): descuento para usuarios autenticados.
@@ -167,6 +171,21 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 - PII (`email`, `phone`) se hashea SHA256 antes de mandarse (`hash_user_data()`), como exige Meta.
 - **Nunca lanza excepción** — cualquier error de red/API se loguea (`logger.error`) y devuelve `False`; el pago sigue su curso igual.
 - `meta_config` también trae `catalog_id` y `whatsapp_business_phone_id`, reservados para integraciones futuras (catálogo de productos en Meta, WhatsApp Business) — hoy solo se usa `pixel_id`/`conversions_api_access_token`.
+
+---
+
+## Integración con Mercado Libre (app `mercadolibre`)
+
+Publicación **manual** de productos en Mercado Libre, disparada desde el admin — no es un sync automático ni programado. Es una sola cuenta de vendedor para todo el grupo 3darg (no está scopeada por marca, a diferencia del resto del sistema).
+
+- **Conexión (OAuth2)**: `GET /api/mercadolibre/authorize/` redirige al login de Mercado Libre; `GET /api/mercadolibre/callback/` recibe el `code` y lo canjea por `access_token`/`refresh_token`, guardados en `MLCredentials` (modelo singleton, `MLCredentials.load()`). El `refresh_token` rota en cada uso — `mercadolibre/services.py::_refresh_access_token()` siempre guarda el que vuelve en la respuesta, nunca reusa el anterior. `get_valid_access_token()` lo renueva solo si está por vencer (margen de 5 minutos).
+- **Publicar/actualizar**: acción de admin *"Publicar/Actualizar en Mercado Libre"* sobre `Product` (`products/admin.py::publicar_en_mercadolibre`) → `mercadolibre/services.py::sync_product(product)`. Primera vez: `POST /items` y guarda el `ml_item_id` devuelto. Siguientes veces: `PUT /items/{id}` con los mismos datos (precio, stock, fotos). `family_name`, `listing_type_id` y `shipping.dimensions` son inmutables en ML una vez creado el ítem — el `PUT` los excluye a propósito.
+- **Requisitos para poder publicar**: `ml_category_id` cargado en el producto (default `MLA375405` = "Cortantes") y al menos una imagen con `channel` en `both`/`ml`. Sin eso, `MLSyncError` con mensaje en español, mostrado en el admin.
+- **Atributos que se mandan**: `BRAND` (fijo "3DARG"), `MODEL` (= `product.sku`, atributo genérico de catálogo) y `SELLER_SKU` (= `product.sku` también, el campo que ML reserva específicamente para el código interno del vendedor — se mandan ambos por compatibilidad, sin tocar `MODEL` por las dudas de que algún listing viejo dependa de él), más `HEIGHT`/`WIDTH`/`DEPTH` si están cargadas las dimensiones (si no, ML marca el ítem `incomplete_technical_specs` y puede quedar en revisión manual).
+- **Fotos por canal**: `ProductImage.channel` (`both|web|ml`) permite tener fotos exclusivas de Mercado Libre (ej: con medidas o marca de agua) sin que aparezcan en la web ni en el feed de Google/Meta. `ml_order` permite un orden de fotos distinto al de la web en la publicación.
+- **`MLListingTemplate`**: plantilla única (singleton, igual patrón que `MLCredentials`) con el texto fijo de la descripción (`Template.safe_substitute()` con `$modelo`/`$medidas`), editable desde el admin.
+- Sin `ML_CLIENT_ID`/`ML_CLIENT_SECRET` configurados en `.env`, cualquier intento de publicar tira `MLSyncError` explicando que falta la config — mismo criterio "vacío = apagado" que el resto de las integraciones.
+- **No hay conexión con `presupuestos3d`**: el SKU que viaja a Mercado Libre es el mismo `Product.sku` que ya usa el feed de Google/Meta, pero no hay ningún sync automático entre esta app y el sistema interno de costeo — si corresponde, se carga a mano ahí (ver `presupuestos3d/CLAUDE.md`, campo `Producto.sku`).
 
 ---
 

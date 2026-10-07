@@ -2,14 +2,18 @@ import os
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
+from django.db.models import Prefetch
 from django.http import HttpResponse, Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import generics
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
-from .models import Product, Category
+from .models import Product, Category, ProductImage
 from .serializers import ProductSerializer, CategorySerializer
 from brands.models import Brand
+
+# Fotos marcadas "Solo Mercado Libre" no se muestran en la web/el feed de Meta-Google.
+WEB_IMAGES_PREFETCH = Prefetch("images", queryset=ProductImage.objects.exclude(channel="ml"))
 
 
 class ProductListAPIView(generics.ListAPIView):
@@ -23,7 +27,7 @@ class ProductListAPIView(generics.ListAPIView):
     def get_queryset(self):
         qs = (
             Product.objects.visible_to(self.request.user)
-            .prefetch_related("images")
+            .prefetch_related(WEB_IMAGES_PREFETCH)
             .select_related("category", "brand")
         )
         brand_slug = self.request.query_params.get("brand_slug")
@@ -41,7 +45,7 @@ class ProductDetailAPIView(generics.RetrieveAPIView):
         # Los productos members_only devuelven 404 a anónimos (no se filtran al frontend).
         return (
             Product.objects.visible_to(self.request.user)
-            .prefetch_related("images")
+            .prefetch_related(WEB_IMAGES_PREFETCH)
             .select_related("category", "brand")
         )
 
@@ -85,7 +89,7 @@ class ProductFeedAPIView(APIView):
                 is_available=True,
                 members_only=False,
             )
-            .prefetch_related("images")
+            .prefetch_related(WEB_IMAGES_PREFETCH)
             .select_related("category", "brand")
             .order_by("name")
         )

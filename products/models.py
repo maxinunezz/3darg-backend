@@ -111,6 +111,35 @@ class Product(models.Model):
         ),
     )
 
+    # --- Integración Mercado Libre (publicación manual vía admin, ver app `mercadolibre`) ---
+    # ml_item_id queda vacío hasta la primera publicación exitosa; a partir de ahí
+    # las siguientes sincronizaciones actualizan ese mismo ítem en vez de crear uno nuevo.
+    ml_item_id = models.CharField(
+        max_length=32,
+        blank=True,
+        help_text="ID del ítem en Mercado Libre (ej: MLA123456789). Se completa solo al publicar.",
+    )
+    ml_category_id = models.CharField(
+        max_length=32,
+        blank=True,
+        default="MLA375405",
+        help_text=(
+            "Categoría de Mercado Libre, distinta de la Category interna. "
+            "Default MLA375405 = 'Cortantes' (sirve para todo el catálogo de Lumy); "
+            "cambiar si el producto es de otro rubro."
+        ),
+    )
+    weight_kg = models.DecimalField(
+        max_digits=6,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        help_text="Peso en kg. Requerido por Mercado Libre para calcular el costo de envío (Mercado Envíos).",
+    )
+    length_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    width_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    height_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -188,10 +217,26 @@ class Product(models.Model):
 
 
 class ProductImage(models.Model):
+    class Channel(models.TextChoices):
+        BOTH = "both", "Ambos (web y Mercado Libre)"
+        WEB = "web", "Solo página web"
+        ML = "ml", "Solo Mercado Libre"
+
     product = models.ForeignKey(Product, related_name="images", on_delete=models.CASCADE)
     image = models.ImageField(upload_to="products/images/")
-    order = models.PositiveIntegerField(default=0)
+    order = models.PositiveIntegerField(default=0, help_text="Orden de la foto en la página web.")
+    ml_order = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Orden en la publicación de Mercado Libre, si querés que sea distinto al de la web. Vacío = usa el mismo orden que la web.",
+    )
     alt = models.CharField(max_length=200, blank=True)
+    channel = models.CharField(
+        max_length=10,
+        choices=Channel.choices,
+        default=Channel.BOTH,
+        help_text="A dónde se muestra esta foto. 'Ambos' es el comportamiento de siempre.",
+    )
 
     class Meta:
         ordering = ["order"]

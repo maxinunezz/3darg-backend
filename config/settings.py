@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'cart',
     'contact',
     'vending',
+    'mercadolibre',
 ]
 
 MIDDLEWARE = [
@@ -172,6 +173,15 @@ EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "Lumy <noreply@lumy.com>")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "3darg1@gmail.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "https://t.me/3darg")
+
+# --- Mercado Libre (publicación de productos) ---
+# Una sola cuenta de vendedor para todo el grupo (3darg), no es por marca.
+# Vacío = integración apagada (botón "Publicar en ML" del admin tira error claro),
+# mismo patrón que GOOGLE_OAUTH_CLIENT_ID/CLOUDINARY_URL.
+ML_CLIENT_ID = os.getenv("ML_CLIENT_ID", "")
+ML_CLIENT_SECRET = os.getenv("ML_CLIENT_SECRET", "")
+ML_REDIRECT_URI = os.getenv("ML_REDIRECT_URI", "")
+ML_SITE_ID = os.getenv("ML_SITE_ID", "MLA")
 
 # --- Media & Static ---
 MEDIA_URL = "/media/"
