@@ -52,6 +52,7 @@ def handle_order_status_change(sender, instance, created, **kwargs):
         _send_owner_notification_email(instance)
         _trigger_bambuddy_print(instance)
         _send_meta_purchase_event(instance)
+        _notify_presupuestos3d(instance)
     elif paid_undone:
         _restore_stock(instance)
 
@@ -155,6 +156,80 @@ def _trigger_bambuddy_print(order):
             )
 
 
+def _notify_presupuestos3d(order):
+    """Avisa a presupuestos3d (sistema interno de gestión) que entró una venta
+    online, para que el dueño la revise y la cargue a mano como Presupuesto
+    si corresponde poner a producir.
+
+    A propósito NO dispara nada automático del lado de presupuestos3d (ni
+    Presupuesto, ni costeo, ni cola de impresión) — solo crea el aviso en su
+    admin (modelo `PedidoOnline`) con los datos necesarios para cargarlo. La
+    decisión de aprobar/producir la toma el dueño a mano.
+
+    Solo actúa si PRESUPUESTOS3D_API_URL y PRESUPUESTOS3D_API_TOKEN están
+    configurados en .env. Los errores se loguean pero nunca rompen el flujo
+    de pago (mismo criterio que `_trigger_bambuddy_print`).
+    """
+    api_url = getattr(settings, "PRESUPUESTOS3D_API_URL", "").rstrip("/")
+    api_token = getattr(settings, "PRESUPUESTOS3D_API_TOKEN", "")
+
+    if not api_url or not api_token:
+        logger.debug(
+            "presupuestos3d no configurado — se omite aviso de venta para orden %s", order.id
+        )
+        return
+
+    items = [
+        {
+            "product_name": item.product_name,
+            "quantity": item.quantity,
+            "unit_price": float(item.unit_price),
+        }
+        for item in order.order_items.all()
+    ]
+    payload = json.dumps({
+        "external_reference": order.external_reference,
+        "brand_slug": order.brand.slug if order.brand_id else "",
+        "brand_name": order.brand.name if order.brand_id else "",
+        "customer_email": order.customer_email,
+        "items": items,
+        "total_amount": float(order.total_amount),
+        "currency": order.currency,
+        "order_created_at": order.created_at.isoformat() if order.created_at else None,
+        "raw_payload": {
+            "order_id": str(order.id),
+        },
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"{api_url}/api/pedidos-online/",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Token {api_token}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            logger.info(
+                "presupuestos3d: aviso de venta creado #%s — orden=%s",
+                result.get("id"), order.id,
+            )
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error(
+            "presupuestos3d HTTP %s al avisar venta orden=%s: %s",
+            e.code, order.id, body,
+        )
+    except Exception as e:
+        logger.error(
+            "presupuestos3d error inesperado al avisar venta orden=%s: %s",
+            order.id, e,
+        )
+
+
 def _send_meta_purchase_event(order):
     """Dispara el evento `Purchase` a Meta Conversions API para la marca de la orden.
 
@@ -239,11 +314,18 @@ def _send_owner_notification_email(order):
         f"  - {item.product_name} x{item.quantity} — {order.currency} {item.unit_price} c/u"
         for item in order.order_items.all()
     )
+    presupuestos3d_note = (
+        "\nYa debería estar como aviso pendiente en el admin de presupuestos3d "
+        "para que lo cargues y pongas a producir.\n"
+        if getattr(settings, "PRESUPUESTOS3D_API_URL", "") and getattr(settings, "PRESUPUESTOS3D_API_TOKEN", "")
+        else ""
+    )
     subject = f"Nueva venta — {order.brand.name} — {order.currency} {order.total_amount}"
     message = (
         f"Nueva venta confirmada en {order.brand.name}.\n\n"
         f"Orden: {order.id}\n"
-        f"Cliente: {order.customer_email or '(sin email, compra de invitado)'}\n\n"
+        f"Cliente: {order.customer_email or '(sin email, compra de invitado)'}\n"
+        f"{presupuestos3d_note}\n"
         f"Productos:\n{items_lines}\n\n"
         f"Total: {order.currency} {order.total_amount}\n"
     )

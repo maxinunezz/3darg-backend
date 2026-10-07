@@ -36,6 +36,13 @@ BAMBUDDY_URL = os.getenv("BAMBUDDY_URL", "")          # ej: http://localhost:800
 BAMBUDDY_API_KEY = os.getenv("BAMBUDDY_API_KEY", "")  # generado en BamBuddy Settings → API Keys
 BAMBUDDY_PRINTER_ID = int(os.getenv("BAMBUDDY_PRINTER_ID", "1"))  # ID de la impresora en BamBuddy
 
+# --- presupuestos3d (aviso de venta online para cargar a mano) ---
+# Token de un usuario staff de presupuestos3d (DRF Token, no password) creado
+# especialmente para esta integración. Sin esto, _notify_presupuestos3d() es
+# un no-op — no rompe el flujo de pago.
+PRESUPUESTOS3D_API_URL = os.getenv("PRESUPUESTOS3D_API_URL", "")      # ej: http://localhost:8001
+PRESUPUESTOS3D_API_TOKEN = os.getenv("PRESUPUESTOS3D_API_TOKEN", "")
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',

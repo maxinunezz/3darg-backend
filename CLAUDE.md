@@ -54,6 +54,8 @@ GOOGLE_OAUTH_CLIENT_ID=...      # Client ID de Google Cloud Console (login "Cont
                                  # Vacío = /api/users/google/ responde 400 explicando que falta config
 
 ML_CLIENT_ID=...  ML_CLIENT_SECRET=...  ML_REDIRECT_URI=...  ML_SITE_ID=MLA   # Mercado Libre, ver sección dedicada
+BAMBUDDY_URL=...  BAMBUDDY_API_KEY=...  BAMBUDDY_PRINTER_ID=1   # cola de impresión automática, vacío = apagado
+PRESUPUESTOS3D_API_URL=...  PRESUPUESTOS3D_API_TOKEN=...        # aviso de venta online, vacío = apagado (ver sección dedicada)
 ```
 
 El mismo `.env` es leído por los servicios `db` y `web` en `docker-compose.yml`.
@@ -189,6 +191,18 @@ Publicación **manual** de productos en Mercado Libre, disparada desde el admin 
 
 ---
 
+## Integración con presupuestos3d (aviso de venta online)
+
+`orders/signals.py::_notify_presupuestos3d()` — cuando una `Order` pasa a `PAID`, le avisa al sistema interno de gestión (`presupuestos3d`, repo aparte, ver `../CLAUDE.md`) para que el dueño la revise y la cargue a mano. Mismo patrón no-bloqueante que `_trigger_bambuddy_print`: gateado por env vars, nunca lanza excepción.
+
+- **A propósito no dispara nada automático del lado de presupuestos3d** (ni `Presupuesto`, ni costeo, ni cola de impresión) — solo crea un registro de solo-alta (`budgets.PedidoOnline`, visible en su admin) con los datos necesarios para cargar el pedido a mano. La decisión de aprobar/producir la toma el dueño.
+- `POST {PRESUPUESTOS3D_API_URL}/api/pedidos-online/` con `Authorization: Token {PRESUPUESTOS3D_API_TOKEN}` (DRF Token de un usuario staff creado especialmente para esta integración en presupuestos3d). Payload: `external_reference`, `brand_slug`/`brand_name`, `customer_email`, `items` (snapshot `product_name`/`quantity`/`unit_price`), `total_amount`, `currency`, `order_created_at`, `raw_payload`.
+- **Idempotente** por `external_reference` del lado de presupuestos3d: un reintento no duplica el aviso.
+- Vacío `PRESUPUESTOS3D_API_URL`/`PRESUPUESTOS3D_API_TOKEN` en `.env` = integración apagada, no rompe nada (mismo criterio que BamBuddy/Meta/Google).
+- El aviso "por mail" de la misma venta ya lo cubre `_send_owner_notification_email` (manda a `CONTACT_EMAIL`/`<SLUG>_CONTACT_EMAIL`); si la integración con presupuestos3d está configurada, ese mismo mail suma una línea recordando que ya está cargado en su admin.
+
+---
+
 ## Deploy en producción (`deploy/`)
 
 El **frontend va a Vercel** (fuera de este repo). Este backend se despliega en un **VPS propio** con su propio stack, separado del `docker-compose.yml` de desarrollo:
@@ -236,6 +250,7 @@ El **frontend va a Vercel** (fuera de este repo). Este backend se despliega en u
 3. **`orders/signals.py`** (post-save de `Order`): cuando el status pasa a `PAID`:
    - **Descuenta stock** de cada producto con `select_for_update()` (atomic).
    - **Manda email** de confirmación a `customer_email`.
+   - **Manda email** al dueño (`_send_owner_notification_email`) y **avisa a presupuestos3d** (`_notify_presupuestos3d`) — ver sección dedicada más abajo.
    - Si vuelve de `PAID → REJECTED|CANCELLED`, **restituye stock**.
    - El status se cachea en `pre_save` (`instance._old_status`) para detectar el cambio.
 
