@@ -1,6 +1,7 @@
 import re
 from decimal import Decimal, ROUND_HALF_UP
 
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator
 from django.db import models
 from django.utils.text import slugify
@@ -241,6 +242,27 @@ class Product(models.Model):
         if is_new and not self.sku:
             self.sku = self.generate_sku()
             super().save(update_fields=["sku"])
+
+    def clean(self):
+        """Validaciones cruzadas entre `is_available` (apagado general),
+        `is_featured` y los canales (`is_available_web`/`is_available_ml`).
+
+        Regla de negocio: `is_available` manda sobre todos los canales —
+        si está apagado, no se vende en ningún lado sin importar los
+        otros flags. Pero la relación NO es al revés: apagar un canal
+        puntual (web o ML) nunca debe tocar `is_available` ni el otro
+        canal, cada uno es independiente. Se corre tanto al guardar desde
+        el form de edición completo como al editar inline desde la lista
+        del admin (`list_editable`), vía `ModelForm.full_clean()`.
+        """
+        super().clean()
+        if self.is_featured and not self.is_available:
+            raise ValidationError({
+                "is_featured": (
+                    "No se puede destacar un producto marcado como no "
+                    "disponible (is_available). Activá 'is_available' primero."
+                ),
+            })
 
     def __str__(self):
         return self.name

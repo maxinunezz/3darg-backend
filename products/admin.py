@@ -28,7 +28,10 @@ class ProductAdmin(admin.ModelAdmin):
         "brand", "category", "members_only", "is_featured",
         "is_available", "is_available_web", "is_available_ml",
     ]
-    list_editable = ["member_discount_percent", "members_only", "is_available_web", "is_available_ml"]
+    list_editable = [
+        "member_discount_percent", "members_only", "is_available", "is_available_web",
+        "is_available_ml", "is_featured",
+    ]
     search_fields = ["name", "description", "sku", "color", "size"]
     prepopulated_fields = {"slug": ("name",)}
     readonly_fields = ["ml_item_id"]

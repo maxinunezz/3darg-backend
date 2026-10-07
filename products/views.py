@@ -27,7 +27,7 @@ class ProductListAPIView(generics.ListAPIView):
     def get_queryset(self):
         qs = (
             Product.objects.visible_to(self.request.user)
-            .filter(is_available_web=True)
+            .filter(is_available=True, is_available_web=True)
             .prefetch_related(WEB_IMAGES_PREFETCH)
             .select_related("category", "brand")
         )
@@ -45,10 +45,10 @@ class ProductDetailAPIView(generics.RetrieveAPIView):
     def get_queryset(self):
         # Los productos members_only devuelven 404 a anónimos (no se filtran al
         # frontend). Los apagados puntualmente en el canal web (is_available_web)
-        # también devuelven 404 — mismo criterio.
+        # o en general (is_available) también devuelven 404 — mismo criterio.
         return (
             Product.objects.visible_to(self.request.user)
-            .filter(is_available_web=True)
+            .filter(is_available=True, is_available_web=True)
             .prefetch_related(WEB_IMAGES_PREFETCH)
             .select_related("category", "brand")
         )
