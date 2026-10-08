@@ -98,7 +98,7 @@ class Product(models.Model):
         CHICO = "chico", "Chico"
         MEDIANO = "mediano", "Mediano"
         GRANDE = "grande", "Grande"
-        OREO_24 = "oreo_24", "Oreo 24cm"
+        A_MEDIDA = "a_medida", "A medida"
 
     # SKU sintético de costeo en presupuestos3d por tamaño de cortante (no
     # por diseño) — productos "ficticios" del otro lado (ej. "Cortante
