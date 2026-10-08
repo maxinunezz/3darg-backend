@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
@@ -43,6 +44,44 @@ BAMBUDDY_PRINTER_ID = int(os.getenv("BAMBUDDY_PRINTER_ID", "1"))  # ID de la imp
 PRESUPUESTOS3D_API_URL = os.getenv("PRESUPUESTOS3D_API_URL", "")      # ej: http://localhost:8001
 PRESUPUESTOS3D_API_TOKEN = os.getenv("PRESUPUESTOS3D_API_TOKEN", "")
 
+# --- Envíopack (cotización de envíos en tiempo real, ver app `shipping`) ---
+# Credenciales de tu cuenta en https://developers.enviopack.com.ar/autenticacion
+# (Api Key / Secret Key, no son las mismas que el login web). Vacío = el endpoint
+# /api/shipping/calculate/ cae directo a SHIPPING_FALLBACK_RATES — mismo criterio
+# "vacío = apagado" que BamBuddy/presupuestos3d/Google/Meta, no rompe el checkout.
+ENVIOPACK_API_URL = os.getenv("ENVIOPACK_API_URL", "https://api.enviopack.com")
+ENVIOPACK_API_KEY = os.getenv("ENVIOPACK_API_KEY", "")
+ENVIOPACK_SECRET_KEY = os.getenv("ENVIOPACK_SECRET_KEY", "")
+ENVIOPACK_TIMEOUT = float(os.getenv("ENVIOPACK_TIMEOUT", "8"))
+# IDs de courier devueltos por GET /correos de Envíopack (requiere las credenciales
+# de arriba) — "andreani" está confirmado en su doc pública; el de Correo Argentino
+# puede variar según cuenta/región, confirmar una vez con GET /correos y ajustar acá
+# si hace falta. Las tarifas de couriers no listados acá se descartan.
+ENVIOPACK_COURIERS = [
+    c.strip() for c in os.getenv("ENVIOPACK_COURIERS", "andreani,correoargentino").split(",") if c.strip()
+]
+
+# --- Cotización de envíos: parámetros de cálculo (ver shipping/services/volumetric.py) ---
+# Peso mínimo facturable por pedido (kg) — los cortantes son muy livianos, sin este
+# piso un pedido chico podría cotizar un flete casi nulo que no cubre el manipuleo real.
+SHIPPING_MIN_WEIGHT_KG = float(os.getenv("SHIPPING_MIN_WEIGHT_KG", "0.2"))
+# Divisor de peso volumétrico: kg = (largo × ancho × alto en cm) / divisor. 5000 es el
+# estándar más común en Argentina (Correo Argentino/Andreani) — puede variar según el
+# acuerdo comercial puntual, confirmar con tu ejecutivo de cuenta si da raro.
+SHIPPING_VOLUMETRIC_DIVISOR = float(os.getenv("SHIPPING_VOLUMETRIC_DIVISOR", "5000"))
+# Dimensiones de empaquetado por defecto en cm (largo, ancho, alto) para productos sin
+# length_cm/width_cm/height_cm cargados en el admin.
+SHIPPING_DEFAULT_ITEM_DIMENSIONS_CM = tuple(
+    float(x) for x in os.getenv("SHIPPING_DEFAULT_ITEM_DIMENSIONS_CM", "15,15,5").split(",")
+)
+# Tarifa de respaldo si Envíopack falla/da timeout/no está configurado. JSON con un
+# precio default y, opcional, un desglose aproximado por primer dígito del código
+# postal (no es una zonificación precisa, es una red de contención). Ej:
+# SHIPPING_FALLBACK_RATES_JSON='{"default": 6500, "zones": {"1": 4500, "8": 9500}}'
+SHIPPING_FALLBACK_RATES = json.loads(
+    os.getenv("SHIPPING_FALLBACK_RATES_JSON", "") or json.dumps({"default": 6500, "zones": {}})
+)
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -63,6 +102,7 @@ INSTALLED_APPS = [
     'contact',
     'vending',
     'mercadolibre',
+    'shipping',
 ]
 
 MIDDLEWARE = [

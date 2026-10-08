@@ -32,6 +32,9 @@ urlpatterns = [
 
     # Mercado Libre — handshake OAuth (alta/renovación de credenciales)
     path("api/mercadolibre/", include("mercadolibre.urls")),
+
+    # Cotización de envíos en tiempo real (Envíopack)
+    path("api/shipping/", include("shipping.urls")),
 ]
 
 urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
