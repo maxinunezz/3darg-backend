@@ -225,21 +225,21 @@ Publicación **manual** de productos en Mercado Libre, disparada desde el admin 
 - **A propósito no dispara nada automático del lado de presupuestos3d** (ni `Presupuesto`, ni costeo, ni cola de impresión) — solo crea un registro de solo-alta (`budgets.PedidoOnline`, visible en su admin) con los datos necesarios para cargar el pedido a mano. La decisión de aprobar/producir la toma el dueño.
 - `POST {PRESUPUESTOS3D_API_URL}/api/pedidos-online/` con `Authorization: Token {PRESUPUESTOS3D_API_TOKEN}` (DRF Token de un usuario staff creado especialmente para esta integración en presupuestos3d). Payload: `external_reference`, `brand_slug`/`brand_name`, `customer_email`, `items` (snapshot `product_name`/`quantity`/`unit_price`), `total_amount`, `currency`, `order_created_at`, `raw_payload`.
 - **Idempotente** por `external_reference` del lado de presupuestos3d: un reintento no duplica el aviso.
-- Vacío `PRESUPUESTOS3D_API_URL`/`PRESUPUESTOS3D_API_TOKEN` en `.env` = integración apagada, no rompe nada (mismo criterio que BamBuddy/Meta/Google).
+- Vacío `PRESUPUESTOS3D_API_URL`/`PRESUPUESTOS3D_API_TOKEN` en `.env` = integración apagada, no rompe nada (mismo criterio que BamBuddy/Meta/Google). **Activa en producción desde 2026-10-08**: Railway (servicio `web`) tiene ambas vars seteadas apuntando a `https://presupuestos3d.vercel.app` + token del usuario staff `integracion_3darg` en su Postgres de Railway, verificado con un `POST` de prueba real al endpoint (201).
 - El aviso "por mail" de la misma venta ya lo cubre `_send_owner_notification_email` (manda a `CONTACT_EMAIL`/`<SLUG>_CONTACT_EMAIL`); si la integración con presupuestos3d está configurada, ese mismo mail suma una línea recordando que ya está cargado en su admin.
 
 ---
 
-## Deploy en producción (`deploy/`)
+## Deploy en producción
 
-El **frontend va a Vercel** (fuera de este repo). Este backend se despliega en un **VPS propio** con su propio stack, separado del `docker-compose.yml` de desarrollo:
+**En producción real (2026-10-08): Railway, no el VPS.** El **frontend va a Vercel** (`ecommerce-frontend`, fuera de este repo, dominio `3darg.com`/`www.3darg.com`). Este backend corre en **Railway**:
 
-- `deploy/docker-compose.prod.yml`: `db` (Postgres 16) + `web` (build de este repo, código empaquetado en la imagen — **no** bind mount como en dev) + `caddy` (HTTPS automático + reverse proxy + sirve `media/` directo).
-- `deploy/Caddyfile`: config del reverse proxy/TLS.
-- `deploy/deploy.sh`: script de despliegue.
-- `deploy/backup-db.sh` (pg_dump diario), `deploy/backup-media.sh` (tar.gz diario de `media/` — las imágenes de producto), `deploy/reconcile-cron.sh`: mantenimiento programado por cron (instalado por `deploy.sh`; ambos backups van a `deploy/backups/` con retención de 14 días). Guardan **en el mismo VPS** — para estar cubierto ante una falla de disco, copiar `deploy/backups/` periódicamente a otro lado (scp, S3, Backblaze).
-- Se corre desde `deploy/` (contexto de build `..`, o sea la raíz de este repo): `docker compose -f docker-compose.prod.yml up -d --build`.
-- Volúmenes persistentes: `postgres_data`, `caddy_data`, `caddy_config` — **no** `external: true` acá (a diferencia del compose de dev), porque en el VPS arrancan vacíos.
+- Proyecto Railway `3darg-backend`, servicio `web` conectado por git a `maxinunezz/3darg-backend` rama `main` (autodeploy en cada push), builder `DOCKERFILE`. Servicio `Postgres` (template `postgres-ssl:18`) en el mismo proyecto — las env vars de Django apuntan a él vía referencias (`${{Postgres.POSTGRES_DB}}`, etc.), sin red pública expuesta (conexión interna `postgres.railway.internal`).
+- Dominio propio `api.3darg.com` (CNAME hacia el target `*.up.railway.app` que da Railway, gestionado desde la pestaña DNS de Vercel Domains porque `3darg.com` usa nameservers de Vercel). `DJANGO_ALLOWED_HOSTS=api.3darg.com`, `CORS_ALLOWED_ORIGINS`/`CSRF_TRUSTED_ORIGINS=https://3darg.com,https://www.3darg.com`, `FRONTEND_BASE_URL=https://3darg.com`, `MP_NOTIFICATION_URL=https://api.3darg.com/api/payments/mp/webhook/` — ya seteadas en Railway (no son el placeholder que describía esta sección antes).
+- Media: Cloudinary (`django-cloudinary-storage`, `CLOUDINARY_URL` en Railway) — las imágenes no viven en un volumen local, sobreviven a cualquier redeploy.
+- Deploy manual puntual desde el repo local: `railway up --service web --ci --yes` (ojo: `railway service redeploy` **no** trae el último commit de git, hay que usar `up --ci`). El flujo normal es simplemente `git push` a `main`.
+
+**`deploy/` (VPS + Caddy) quedó abandonado, nunca se usó en producción** — se preparó un stack alternativo (`docker-compose.prod.yml` con `db`+`web`+`caddy`, `backup-db.sh`/`backup-media.sh`/`reconcile-cron.sh` por cron) pero nunca se ejecutó: sin backups reales, sin DNS propio, dominio placeholder. Se decidió Railway en su lugar porque da Postgres gestionado + HTTPS automático + deploy por git push sin mantener VPS/Caddy/cron a mano. La carpeta se deja de referencia por si se reconsidera algún día, pero no reflejes este `deploy/` como el mecanismo real si te preguntan cómo se despliega.
 
 ---
 
@@ -249,7 +249,7 @@ El **frontend va a Vercel** (fuera de este repo). Este backend se despliega en u
 - Las vistas de pagos y contacto declaran `AllowAny` porque pueden invocarse sin sesión.
 - JWT: `ACCESS_TOKEN_LIFETIME=2h`, `REFRESH_TOKEN_LIFETIME=7d`, `ROTATE_REFRESH_TOKENS=True`.
 - Throttling: anónimos `10000/day`, usuarios `50000/day`. `contact` aplica un throttle adicional de `5/hour` por IP.
-- CORS: solo `http://localhost:3000` (cambiar en prod). CSRF acepta `*.ngrok-free.app` para los webhooks de MP en desarrollo.
+- CORS: `http://localhost:3000` en dev; en producción (Railway) `CORS_ALLOWED_ORIGINS=https://3darg.com,https://www.3darg.com`. CSRF acepta `*.ngrok-free.app` para los webhooks de MP en desarrollo; en prod, `https://3darg.com,https://www.3darg.com`.
 
 ### Login con Google (`POST /api/users/google/`)
 
@@ -329,7 +329,7 @@ Si el admin se ve sin estilos:
 ## Cosas a tener en cuenta
 
 - `REDME.md` (sic) en este directorio es un typo histórico. Ignorar o renombrar.
-- En producción: `DJANGO_DEBUG=0`, rotar `DJANGO_SECRET_KEY`, ajustar `CORS_ALLOWED_ORIGINS`, configurar SMTP real (default es `console`).
-- El webhook de MP requiere URL pública. En dev se usa **ngrok** (whitelisteado en `DJANGO_ALLOWED_HOSTS` y `CSRF_TRUSTED_ORIGINS`).
-- `volumes.postgres_data` está marcado como `external: true` en `docker-compose.yml` — el volumen es persistente y no se borra con `docker compose down -v`.
+- En producción (Railway): `DJANGO_DEBUG=0` y `CORS_ALLOWED_ORIGINS` ya están seteados — ver sección de Deploy. Pendiente real: SMTP sigue en `console` (Resend preparado pero no activado, ver sección Email arriba), y falta rotar `DJANGO_SECRET_KEY` del valor usado en dev.
+- El webhook de MP requiere URL pública. En dev se usa **ngrok** (whitelisteado en `DJANGO_ALLOWED_HOSTS` y `CSRF_TRUSTED_ORIGINS`); en producción es `https://api.3darg.com/api/payments/mp/webhook/` directo.
+- `volumes.postgres_data` está marcado como `external: true` en el `docker-compose.yml` de **dev** — el volumen es persistente y no se borra con `docker compose down -v`. En producción no aplica (Postgres es un servicio gestionado de Railway, no un volumen local).
 - `Brand.parent` es `on_delete=PROTECT`: no se puede borrar 3DARG si tiene sub-marcas colgando.
