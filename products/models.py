@@ -2,7 +2,7 @@ import re
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.core.exceptions import ValidationError
-from django.core.validators import MaxValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.text import slugify
 from brands.models import Brand
@@ -160,6 +160,83 @@ class Product(models.Model):
             "mercadolibre/services.py::handle_item_notification()."
         ),
     )
+    # --- Gastos por canal de venta (Mercado Libre / Página web) ---
+    # Sin defaults de IVA/Ingresos Brutos a propósito: el dueño los carga a
+    # mano según su situación impositiva real, no queremos asumir un valor
+    # que puede ser incorrecto para su provincia/condición frente al IVA.
+    ml_commission_percent = models.DecimalField(
+        "Comisión Mercado Libre (%)",
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Comisión que cobra Mercado Libre sobre el precio de venta (varía ~11,8%–17,14% según categoría/tipo de publicación).",
+    )
+    ml_fixed_fee = models.DecimalField(
+        "Cargo fijo Mercado Libre",
+        max_digits=10, decimal_places=2, default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Cargo fijo por unidad vendida que cobra Mercado Libre (depende del precio, escalonado — cargalo a mano según la tabla vigente de ML).",
+    )
+    ml_vat_percent = models.DecimalField(
+        "IVA Mercado Libre (%)",
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="IVA aplicable a esta venta, si corresponde.",
+    )
+    ml_gross_income_tax_percent = models.DecimalField(
+        "Ingresos Brutos Mercado Libre (%)",
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Ingresos Brutos (IIBB) aplicable según la provincia del dueño.",
+    )
+    ml_other_variable_percent = models.DecimalField(
+        "Otro costo variable Mercado Libre (%)",
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Cualquier otro costo variable sobre el precio (ej: cuotas sin interés). Vacío/0 = no aplica.",
+    )
+    ml_shipping_cost = models.DecimalField(
+        "Costo de envío Mercado Libre",
+        max_digits=10, decimal_places=2, default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Costo de envío que absorbe el vendedor en esta venta, si corresponde (Mercado Envíos full/flex, etc.).",
+    )
+    web_commission_percent = models.DecimalField(
+        "Comisión Página web (%)",
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Comisión sobre el precio de venta en este canal (ej: la de MercadoPago u otro medio de pago), si corresponde.",
+    )
+    web_fixed_fee = models.DecimalField(
+        "Cargo fijo Página web",
+        max_digits=10, decimal_places=2, default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Cargo fijo por unidad vendida en este canal, si corresponde.",
+    )
+    web_vat_percent = models.DecimalField(
+        "IVA Página web (%)",
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="IVA aplicable a esta venta, si corresponde.",
+    )
+    web_gross_income_tax_percent = models.DecimalField(
+        "Ingresos Brutos Página web (%)",
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Ingresos Brutos (IIBB) aplicable según la provincia del dueño.",
+    )
+    web_other_variable_percent = models.DecimalField(
+        "Otro costo variable Página web (%)",
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Cualquier otro costo variable sobre el precio (ej: cuotas sin interés). Vacío/0 = no aplica.",
+    )
+    web_shipping_cost = models.DecimalField(
+        "Costo de envío Página web",
+        max_digits=10, decimal_places=2, default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Costo de envío que absorbe el vendedor en esta venta, si corresponde.",
+    )
+
     members_only = models.BooleanField(
         default=False,
         help_text="Si está activo, el producto solo es visible y comprable por usuarios con cuenta.",
@@ -399,6 +476,43 @@ class Product(models.Model):
 
     def is_visible_to(self, user) -> bool:
         return (not self.members_only) or bool(user and getattr(user, "is_authenticated", False))
+
+    def channel_total_expenses(self, channel: str) -> Decimal:
+        """Suma de todos los gastos de vender este producto por `channel`
+        ('ml' o 'web'): comisión + IVA + Ingresos Brutos + otro costo
+        variable (los cuatro en % sobre `price`) más el cargo fijo y el
+        costo de envío (ambos en $). Fuente de verdad de "Total de gastos
+        del canal" en la pantalla de Precio/Stock/Canales del admin.
+        """
+        percent_total = (
+            getattr(self, f"{channel}_commission_percent")
+            + getattr(self, f"{channel}_vat_percent")
+            + getattr(self, f"{channel}_gross_income_tax_percent")
+            + getattr(self, f"{channel}_other_variable_percent")
+        )
+        variable = self.price * percent_total / Decimal(100)
+        fixed = getattr(self, f"{channel}_fixed_fee") + getattr(self, f"{channel}_shipping_cost")
+        return (variable + fixed).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def channel_net_profit(self, channel: str, cost: Decimal | None) -> Decimal | None:
+        """Ganancia neta ($) vendiendo por `channel`: price - cost - gastos
+        del canal. `cost` viene de presupuestos3d (ver
+        `products/services/presupuestos3d.py::get_cost()`) — si no está
+        disponible, no se puede calcular la ganancia real y se devuelve
+        `None` (el admin muestra "costo no disponible" en ese caso).
+        """
+        if cost is None:
+            return None
+        gastos = self.channel_total_expenses(channel)
+        return (self.price - cost - gastos).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def channel_net_profit_percent(self, channel: str, cost: Decimal | None) -> Decimal | None:
+        """Ganancia neta como % de `price`. `None` si falta el costo o si
+        `price` es 0 (no se puede expresar un % sobre precio cero)."""
+        if cost is None or not self.price:
+            return None
+        ganancia = self.channel_net_profit(channel, cost)
+        return (ganancia / self.price * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
 
 
 class ProductImage(models.Model):

@@ -1,6 +1,10 @@
+from decimal import Decimal
+
 from django.contrib import admin
 from django.forms.models import ModelChoiceIterator
+from django.utils.html import format_html
 from .models import Product, Category, ProductImage
+from .services.presupuestos3d import get_cost
 from mercadolibre.services import sync_product, MLSyncError
 
 
@@ -85,9 +89,48 @@ class ProductAdmin(admin.ModelAdmin):
     ]
     search_fields = ["name", "description", "sku", "color", "size"]
     prepopulated_fields = {"slug": ("name",)}
-    readonly_fields = ["ml_item_id"]
+    readonly_fields = ["ml_item_id", "ml_resumen", "web_resumen"]
     inlines = [ProductImageInline]
     actions = ["publicar_en_mercadolibre", "regenerar_sku"]
+
+    def _channel_resumen(self, obj, channel: str, label: str):
+        """Costo (presupuestos3d, por SKU) + gastos totales + ganancia neta
+        ($ y %) de vender `obj` por `channel`. Se recalcula en cada render
+        de la ficha (al abrirla o guardarla) — no hace falta en vivo mientras
+        se tipea, ver `products/services/presupuestos3d.py`.
+        """
+        if obj is None or not obj.pk:
+            return "Guardá el producto primero para ver este resumen."
+
+        cost = None
+        if obj.sku:
+            cost_data = get_cost(obj.sku)
+            if cost_data:
+                cost = Decimal(cost_data["unit_cost_avg"])
+        costo_str = f"${cost:.2f}" if cost is not None else "costo no disponible"
+
+        gastos = obj.channel_total_expenses(channel)
+        ganancia = obj.channel_net_profit(channel, cost)
+        if ganancia is not None:
+            ganancia_pct = obj.channel_net_profit_percent(channel, cost)
+            ganancia_str = f"${ganancia:.2f} ({ganancia_pct}%)"
+        else:
+            ganancia_str = "no se puede calcular (falta el costo de presupuestos3d)"
+
+        return format_html(
+            "<strong>Costo (presupuestos3d):</strong> {} &nbsp;|&nbsp; "
+            "<strong>Gastos de {}:</strong> ${} &nbsp;|&nbsp; "
+            "<strong>Ganancia neta:</strong> {}",
+            costo_str, label, f"{gastos:.2f}", ganancia_str,
+        )
+
+    @admin.display(description="Resumen Mercado Libre")
+    def ml_resumen(self, obj):
+        return self._channel_resumen(obj, "ml", "Mercado Libre")
+
+    @admin.display(description="Resumen Página web")
+    def web_resumen(self, obj):
+        return self._channel_resumen(obj, "web", "Página web")
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         field = super().formfield_for_foreignkey(db_field, request, **kwargs)
@@ -120,18 +163,41 @@ class ProductAdmin(admin.ModelAdmin):
             ),
         }),
         ("Precio y stock", {"fields": ("price", "stock", "is_available", "is_featured")}),
-        ("Canales de venta", {
-            "fields": ("is_available_web", "is_available_ml"),
+        ("Mercado Libre — canal y ganancia", {
+            "fields": (
+                "is_available_ml",
+                "ml_commission_percent", "ml_fixed_fee", "ml_vat_percent",
+                "ml_gross_income_tax_percent", "ml_other_variable_percent", "ml_shipping_cost",
+                "ml_resumen",
+            ),
             "description": (
-                "Prender/apagar este producto en cada canal por separado, sin "
-                "afectar a los demás (ej: pausarlo en Mercado Libre pero "
-                "dejarlo visible en la web, o al revés). 'is_available' (arriba) "
-                "sigue siendo el apagado general: si está apagado, no se vende "
-                "en ningún lado sin importar estos dos. Mercado Libre: después "
-                "de cambiar is_available_ml corré la acción \"Publicar/Actualizar "
+                "Prender/apagar este producto en Mercado Libre y cargar los "
+                "gastos de esa venta para ver cuánto queda de ganancia neta. "
+                "Comisión ML varía ~11,8%–17,14% según categoría/tipo de "
+                "publicación; el cargo fijo es escalonado por precio, cargalo "
+                "a mano según la tabla vigente de ML. El costo de fabricación "
+                "se trae solo de presupuestos3d por SKU — \"costo no disponible\" "
+                "si ese sistema está apagado o el SKU no matchea. 'is_available' "
+                "(arriba) sigue siendo el apagado general: si está apagado, no "
+                "se vende en ningún lado sin importar este canal. Después de "
+                "cambiar is_available_ml corré la acción \"Publicar/Actualizar "
                 "en Mercado Libre\" para que el pausado/reactivado se refleje "
                 "ahí — no es automático. También se apaga solo cuando Mercado "
                 "Libre nos avisa (webhook) que el ítem ya no está activo."
+            ),
+        }),
+        ("Página web — canal y ganancia", {
+            "fields": (
+                "is_available_web",
+                "web_commission_percent", "web_fixed_fee", "web_vat_percent",
+                "web_gross_income_tax_percent", "web_other_variable_percent", "web_shipping_cost",
+                "web_resumen",
+            ),
+            "description": (
+                "Prender/apagar este producto en la web y cargar los gastos de "
+                "esa venta (ej: comisión del medio de pago, envío a cargo "
+                "propio) para ver la ganancia neta. 'is_available' (arriba) "
+                "sigue siendo el apagado general, independiente de este canal."
             ),
         }),
         ("Descuento por volumen", {
