@@ -75,6 +75,9 @@ class CategoryAdmin(admin.ModelAdmin):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
+    class Media:
+        js = ["products/admin/category_cascade.js"]
+
     list_display = [
         "name", "brand", "sku", "price", "member_discount_percent", "members_only",
         "stock", "is_available", "is_available_web", "is_available_ml", "is_featured",
