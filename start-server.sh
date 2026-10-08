@@ -3,7 +3,9 @@
 set -e
 
 echo "--- 1. Esperando a que la base de datos esté lista ---"
-until (echo > /dev/tcp/db/5432) >/dev/null 2>&1; do
+DB_HOST="${POSTGRES_HOST:-db}"
+DB_PORT="${POSTGRES_PORT:-5432}"
+until (echo > "/dev/tcp/${DB_HOST}/${DB_PORT}") >/dev/null 2>&1; do
   echo "Postgres no responde todavía... esperando 1 segundo."
   sleep 1
 done
