@@ -86,6 +86,34 @@ class Category(models.Model):
 
 
 class Product(models.Model):
+    class CutterSize(models.TextChoices):
+        """Tamaño de COSTEO del cortante (tamaño de la pieza, no el diseño).
+
+        Ver `cost_sku()`/`COST_SKU_BY_CUTTER_SIZE` más abajo: todos los
+        diseños de un mismo tamaño comparten el mismo costo de fabricación
+        en presupuestos3d, así que el costo de un producto se busca por
+        este campo, no por su `sku` propio.
+        """
+        MINI = "mini", "Mini"
+        CHICO = "chico", "Chico"
+        MEDIANO = "mediano", "Mediano"
+        GRANDE = "grande", "Grande"
+        OREO_24 = "oreo_24", "Oreo 24cm"
+
+    # SKU sintético de costeo en presupuestos3d por tamaño de cortante (no
+    # por diseño) — productos "ficticios" del otro lado (ej. "Cortante
+    # Mediano x100") pensados para que muchos diseños de un mismo tamaño de
+    # pieza compartan el mismo costeo, en vez de depender del SKU propio de
+    # cada diseño (que dejaría el costo en "no disponible" cada vez que se
+    # suma un diseño nuevo sin cargar un SKU nuevo del otro lado). Solo
+    # MEDIANO tiene SKU sintético confirmado hoy — sumar una línea acá
+    # cuando se cargue el costeo de los demás tamaños en presupuestos3d;
+    # hasta entonces esos tamaños quedan en "costo no disponible" sin
+    # romper nada (ver `cost_sku()` y `products/admin.py::_channel_resumen`).
+    COST_SKU_BY_CUTTER_SIZE = {
+        CutterSize.MEDIANO: "LUMY-COR-TALLA-MEDIANO",
+    }
+
     name = models.CharField(max_length=200)
     slug = models.SlugField(unique=True, blank=True)
     sku = models.CharField(
@@ -137,6 +165,22 @@ class Product(models.Model):
     description = models.TextField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.PositiveIntegerField(default=0)
+    cutter_size = models.CharField(
+        "Tamaño de cortante",
+        max_length=20,
+        choices=CutterSize.choices,
+        blank=True,
+        default=CutterSize.MEDIANO,
+        help_text=(
+            "Tamaño de costeo del cortante (la pieza, no el diseño) — se usa "
+            "SOLO para traer el costo de fabricación desde presupuestos3d en "
+            "la pantalla de Precio/Stock/Canales (ver cost_sku()), no afecta "
+            "el SKU propio del producto. Vacío = no se busca costo por "
+            "tamaño (producto no es un cortante). Si el tamaño elegido "
+            "todavía no tiene SKU sintético cargado en COST_SKU_BY_CUTTER_SIZE, "
+            "el costo queda en \"no disponible\" sin romper nada."
+        ),
+    )
     is_available = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
     is_available_web = models.BooleanField(
@@ -476,6 +520,22 @@ class Product(models.Model):
 
     def is_visible_to(self, user) -> bool:
         return (not self.members_only) or bool(user and getattr(user, "is_authenticated", False))
+
+    def cost_sku(self) -> str | None:
+        """SKU a consultar en presupuestos3d para el costo de fabricación
+        de este producto.
+
+        NO es `self.sku` (el SKU propio de cada diseño) — es el SKU
+        sintético de costeo por `cutter_size` (`COST_SKU_BY_CUTTER_SIZE`),
+        porque muchos diseños de cortante comparten el mismo tamaño de
+        pieza y por lo tanto el mismo costo real. `None` si no tiene
+        `cutter_size` cargado o ese tamaño todavía no tiene SKU sintético
+        confirmado del otro lado — en ambos casos el admin muestra "costo
+        no disponible" sin romper la ficha.
+        """
+        if not self.cutter_size:
+            return None
+        return self.COST_SKU_BY_CUTTER_SIZE.get(self.cutter_size)
 
     def channel_total_expenses(self, channel: str) -> Decimal:
         """Suma de todos los gastos de vender este producto por `channel`

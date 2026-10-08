@@ -103,8 +103,9 @@ class ProductAdmin(admin.ModelAdmin):
             return "Guardá el producto primero para ver este resumen."
 
         cost = None
-        if obj.sku:
-            cost_data = get_cost(obj.sku)
+        costeo_sku = obj.cost_sku()
+        if costeo_sku:
+            cost_data = get_cost(costeo_sku)
             if cost_data:
                 cost = Decimal(cost_data["unit_cost_avg"])
         costo_str = f"${cost:.2f}" if cost is not None else "costo no disponible"
@@ -162,7 +163,16 @@ class ProductAdmin(admin.ModelAdmin):
                 "queden reflejados en el SKU — no se recalcula solo al guardar."
             ),
         }),
-        ("Precio y stock", {"fields": ("price", "stock", "is_available", "is_featured")}),
+        ("Precio y stock", {
+            "fields": ("price", "stock", "cutter_size", "is_available", "is_featured"),
+            "description": (
+                "'Tamaño de cortante' es el tamaño de COSTEO (la pieza, no "
+                "el diseño) — determina qué costo se trae de presupuestos3d "
+                "para calcular la ganancia neta de cada canal más abajo. No "
+                "tiene efecto en productos que no sean cortantes (dejalo "
+                "vacío en ese caso)."
+            ),
+        }),
         ("Mercado Libre — canal y ganancia", {
             "fields": (
                 "is_available_ml",
