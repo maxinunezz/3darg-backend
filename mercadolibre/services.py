@@ -1,4 +1,5 @@
 import logging
+from functools import lru_cache
 from string import Template
 
 import requests
@@ -156,6 +157,34 @@ def _build_description(product):
     )
 
 
+@lru_cache(maxsize=32)
+def _fetch_category_attribute_ids(category_id):
+    """IDs de atributos que admite `category_id` en Mercado Libre (ej: si la
+    categoría tiene COLOR, SIZE, etc. entre sus atributos propios).
+
+    Endpoint público (`GET /categories/{id}/attributes`, no necesita
+    access_token) — se cachea en memoria por categoría porque la lista no
+    cambia en caliente y evita pegarle a la API una vez por producto en una
+    publicación en lote (`publicar_en_mercadolibre` puede correr sobre
+    varios productos de la misma categoría). Usado para decidir si mandar
+    `color`/`size` del producto como atributos reales de la publicación (ver
+    `_build_payload()`) sin asumir que toda categoría los admite — distintas
+    sub-marcas pueden terminar publicando en categorías de ML muy distintas
+    (ej: indumentaria con talle real vs. cortantes sin atributo de tamaño).
+
+    Devuelve un frozenset vacío si la consulta falla (red, categoría
+    inválida, etc.) — es una mejora opcional de la publicación, nunca debe
+    bloquearla.
+    """
+    try:
+        response = requests.get(f"{ML_API_BASE}/categories/{category_id}/attributes", timeout=15)
+        response.raise_for_status()
+        return frozenset(attr["id"] for attr in response.json())
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        logger.warning("No se pudieron consultar los atributos de la categoría %s de Mercado Libre.", category_id)
+        return frozenset()
+
+
 def _build_payload(product):
     if not product.ml_category_id:
         raise MLSyncError("El producto no tiene categoría de Mercado Libre cargada (ml_category_id).")
@@ -215,6 +244,17 @@ def _build_payload(product):
     # el checksum y rechaza el POST si el formato no es válido.
     if product.gtin:
         payload["attributes"].append({"id": "GTIN", "value_name": product.gtin})
+
+    # color/size son campos genéricos del producto (también se usan para armar el SKU,
+    # ver Product.generate_sku()) — se mandan como atributos reales de ML (COLOR/SIZE)
+    # SOLO si la categoría cargada los admite (confirmado en vivo vía
+    # _fetch_category_attribute_ids), para no romper el publish en categorías que no
+    # los tengan (ej: MLA375405 "Cortantes" no tiene atributo de tamaño/talle).
+    category_attribute_ids = _fetch_category_attribute_ids(product.ml_category_id)
+    if product.color and "COLOR" in category_attribute_ids:
+        payload["attributes"].append({"id": "COLOR", "value_name": product.color})
+    if product.size and "SIZE" in category_attribute_ids:
+        payload["attributes"].append({"id": "SIZE", "value_name": product.size})
 
     # sale_terms es una clave aparte de "attributes" (confirmado en vivo contra
     # GET /categories/MLA375405/sale_terms) — WARRANTY_TIME necesita value_struct, no

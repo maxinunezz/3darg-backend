@@ -207,14 +207,6 @@ class ProductAdmin(admin.ModelAdmin):
                 "se regenere automáticamente al crear el producto."
             ),
         }),
-        ("Color y tamaño", {
-            "fields": ("color", "size"),
-            "description": (
-                "Solo informativo (no son variantes con stock propio). Si los "
-                "cargás, usá la acción \"Regenerar SKU\" de la lista para que "
-                "queden reflejados en el SKU — no se recalcula solo al guardar."
-            ),
-        }),
         ("Precio y stock", {
             "fields": ("price", "stock", "cutter_size", "is_available", "is_featured"),
             "description": (
@@ -225,41 +217,55 @@ class ProductAdmin(admin.ModelAdmin):
                 "vacío en ese caso)."
             ),
         }),
-        ("Mercado Libre — canal y ganancia", {
-            "fields": (
-                "is_available_ml",
-                "ml_commission_percent", "ml_fixed_fee", "ml_vat_percent",
-                "ml_gross_income_tax_percent", "ml_other_variable_percent", "ml_shipping_cost",
-                "ml_resumen",
-            ),
-            "description": (
-                "Prender/apagar este producto en Mercado Libre y cargar los "
-                "gastos de esa venta para ver cuánto queda de ganancia neta. "
-                "Comisión ML varía ~11,8%–17,14% según categoría/tipo de "
-                "publicación; el cargo fijo es escalonado por precio, cargalo "
-                "a mano según la tabla vigente de ML. El costo de fabricación "
-                "se trae solo de presupuestos3d por SKU — \"costo no disponible\" "
-                "si ese sistema está apagado o el SKU no matchea. 'is_available' "
-                "(arriba) sigue siendo el apagado general: si está apagado, no "
-                "se vende en ningún lado sin importar este canal. Después de "
-                "cambiar is_available_ml corré la acción \"Publicar/Actualizar "
-                "en Mercado Libre\" para que el pausado/reactivado se refleje "
-                "ahí — no es automático. También se apaga solo cuando Mercado "
-                "Libre nos avisa (webhook) que el ítem ya no está activo."
-            ),
-        }),
-        ("Página web — canal y ganancia", {
+        ("Página web — todo lo que necesita este canal", {
             "fields": (
                 "is_available_web",
+                "google_product_category",
                 "web_commission_percent", "web_fixed_fee", "web_vat_percent",
                 "web_gross_income_tax_percent", "web_other_variable_percent", "web_shipping_cost",
                 "web_resumen",
             ),
             "description": (
-                "Prender/apagar este producto en la web y cargar los gastos de "
-                "esa venta (ej: comisión del medio de pago, envío a cargo "
-                "propio) para ver la ganancia neta. 'is_available' (arriba) "
+                "Todo lo que hace falta para vender este producto en la página web, "
+                "junto en un solo lugar: prender/apagar el canal, la categoría de "
+                "Google/Meta Catalog para el feed (se nutre del mismo catálogo web), "
+                "y los gastos de esta venta (ej: comisión del medio de pago, envío a "
+                "cargo propio) para ver la ganancia neta. 'is_available' (arriba) "
                 "sigue siendo el apagado general, independiente de este canal."
+            ),
+        }),
+        ("Mercado Libre — todo lo que necesita este canal", {
+            "fields": (
+                "is_available_ml",
+                "ml_item_id", "ml_category_id",
+                "color", "size",
+                "weight_kg", "length_cm", "width_cm", "height_cm",
+                "gtin", "warranty_months", "free_shipping_seller_paid",
+                "ml_commission_percent", "ml_fixed_fee", "ml_vat_percent",
+                "ml_gross_income_tax_percent", "ml_other_variable_percent", "ml_shipping_cost",
+                "ml_resumen",
+            ),
+            "description": (
+                "Todo lo que hace falta para publicar/actualizar este producto en "
+                "Mercado Libre, junto en un solo lugar: prender/apagar el canal, "
+                "categoría de ML, color y tamaño (se mandan como atributos reales "
+                "COLOR/SIZE de la publicación SOLO si la categoría cargada los admite "
+                "— si no, quedan solo para armar el SKU, sin romper nada; usá la "
+                "acción \"Regenerar SKU\" de la lista si los cargás/cambiás después de "
+                "crear el producto, no se recalcula solo al guardar), dimensiones/peso "
+                "(necesarios para el envío — sin esto ML marca el ítem con specs "
+                "técnicas incompletas), GTIN/garantía/envío gratis (opcionales, "
+                "mejoran la calidad/competitividad de la publicación) y los gastos de "
+                "esta venta para ver la ganancia neta. ml_item_id se completa solo al "
+                "publicar por primera vez. 'is_available' (arriba) sigue siendo el "
+                "apagado general: si está apagado, no se vende en ningún lado sin "
+                "importar este canal. Después de cambiar cualquier campo de acá corré "
+                "la acción \"Publicar/Actualizar en Mercado Libre\" para que se "
+                "refleje en la publicación real — no es automático. También se apaga "
+                "solo cuando Mercado Libre nos avisa (webhook) que el ítem ya no está "
+                "activo. Si 'is_available_ml' está prendido, necesitás al menos 3 "
+                "fotos marcadas para Mercado Libre cargadas en la sección de Imágenes "
+                "más abajo para poder guardar el producto."
             ),
         }),
         ("Descuento por volumen", {
@@ -275,26 +281,6 @@ class ProductAdmin(admin.ModelAdmin):
             "description": (
                 "members_only: el producto solo lo ven y compran usuarios con cuenta. "
                 "member_discount_percent: descuento (%) que reciben los socios."
-            ),
-        }),
-        ("Meta / Google Catalog", {
-            "fields": ("google_product_category",),
-            "description": (
-                "Categoría de la taxonomía de Google/Meta para el feed de Meta Catalog "
-                "(ej: 'Sporting Goods > Exercise & Fitness Equipment')."
-            ),
-        }),
-        ("Mercado Libre", {
-            "fields": (
-                "ml_item_id", "ml_category_id", "weight_kg", "length_cm", "width_cm", "height_cm",
-                "gtin", "warranty_months", "free_shipping_seller_paid",
-            ),
-            "description": (
-                "ml_category_id y las dimensiones/peso son necesarios para publicar. "
-                "ml_item_id se completa solo al publicar por primera vez. gtin, "
-                "warranty_months y free_shipping_seller_paid son opcionales — mejoran "
-                "la calidad/competitividad de la publicación pero no son obligatorios "
-                "para poder publicar (ver help text de cada campo)."
             ),
         }),
     )

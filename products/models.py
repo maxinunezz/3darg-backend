@@ -139,10 +139,13 @@ class Product(models.Model):
         max_length=50,
         blank=True,
         help_text=(
-            "Color del producto, solo informativo/descriptivo (no es una "
-            "variante con stock propio — para eso falta un modelo de "
-            "variantes que hoy no existe). Se usa para armar el SKU si está "
-            "cargado."
+            "Color del producto (no es una variante con stock propio — para "
+            "eso falta un modelo de variantes que hoy no existe). Se usa "
+            "para armar el SKU si está cargado, y además se manda como "
+            "atributo COLOR de la publicación de Mercado Libre, pero SOLO si "
+            "la categoría cargada en `ml_category_id` admite ese atributo "
+            "(se verifica en vivo contra la API de ML al publicar) — si no "
+            "lo admite, el campo queda solo para el SKU, sin romper nada."
         ),
     )
     size = models.CharField(
@@ -150,8 +153,13 @@ class Product(models.Model):
         max_length=50,
         blank=True,
         help_text=(
-            "Tamaño del producto, solo informativo/descriptivo (mismo "
-            "criterio que color). Se usa para armar el SKU si está cargado."
+            "Tamaño del producto (mismo criterio que color): se usa para "
+            "armar el SKU si está cargado, y se manda como atributo SIZE de "
+            "la publicación de Mercado Libre solo si la categoría cargada lo "
+            "admite (hoy MLA375405 'Cortantes' no tiene un atributo de "
+            "tamaño/talle propio, así que acá queda solo informativo — se "
+            "activa solo si en el futuro se publica en una categoría que sí "
+            "lo tenga, ej. indumentaria)."
         ),
     )
     google_product_category = models.CharField(
