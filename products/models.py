@@ -162,6 +162,34 @@ class Product(models.Model):
             "lo tenga, ej. indumentaria)."
         ),
     )
+    shape = models.CharField(
+        "Forma",
+        max_length=50,
+        blank=True,
+        help_text=(
+            "Forma del producto (ej: Animal, Estrella, Número, Calabaza...) "
+            "— se manda como atributo COOKIE_CUTTER_SHAPE de la publicación "
+            "de Mercado Libre, solo si la categoría cargada lo admite (hoy "
+            "MLA375405 'Cortantes' sí lo tiene — aparece en Mercado Libre "
+            "como 'Características secundarias', suma a la calidad de la "
+            "publicación). Texto libre: no hace falta que coincida con las "
+            "opciones sugeridas de ML. Vacío = no se informa."
+        ),
+    )
+    is_dishwasher_safe = models.BooleanField(
+        "Apto para lavavajillas",
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Si el producto es apto para lavavajillas. Se manda como "
+            "atributo IS_DISHWASHER_SAFE de la publicación de Mercado Libre "
+            "(Sí/No), solo si la categoría cargada lo admite. Dejalo en "
+            "blanco ('Desconocido', valor vacío) si no corresponde "
+            "informarlo — a diferencia de un booleano normal, acá 'vacío' "
+            "no equivale a 'No': simplemente no se manda el atributo."
+        ),
+    )
     google_product_category = models.CharField(
         max_length=255,
         blank=True,

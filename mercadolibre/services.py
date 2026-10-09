@@ -23,6 +23,11 @@ MIN_ML_PICTURES = 3
 # tercero no nos la emite).
 ML_WARRANTY_TYPE_SELLER_VALUE_ID = "2230280"
 
+# IS_DISHWASHER_SAFE.value_id para MLA375405 (value_type="boolean"), confirmado en vivo
+# vía GET /categories/MLA375405/attributes — ML pide el value_id puntual, no alcanza con
+# mandar un booleano suelto.
+ML_DISHWASHER_SAFE_VALUE_IDS = {True: "242085", False: "242084"}
+
 # Margen de seguridad antes de que venza el access_token: lo renovamos un poco
 # antes para no arriesgarnos a que expire a mitad de una sync.
 TOKEN_REFRESH_MARGIN = timezone.timedelta(minutes=5)
@@ -255,6 +260,17 @@ def _build_payload(product):
         payload["attributes"].append({"id": "COLOR", "value_name": product.color})
     if product.size and "SIZE" in category_attribute_ids:
         payload["attributes"].append({"id": "SIZE", "value_name": product.size})
+    # "Características secundarias" en el panel de ML (forma, apto lavavajillas) — no
+    # son obligatorias para publicar, pero suman a la "calidad de la publicación"
+    # (ML las muestra ahí mismo como "0 características completas" si quedan vacías).
+    if product.shape and "COOKIE_CUTTER_SHAPE" in category_attribute_ids:
+        payload["attributes"].append({"id": "COOKIE_CUTTER_SHAPE", "value_name": product.shape})
+    if product.is_dishwasher_safe is not None and "IS_DISHWASHER_SAFE" in category_attribute_ids:
+        payload["attributes"].append({
+            "id": "IS_DISHWASHER_SAFE",
+            "value_id": ML_DISHWASHER_SAFE_VALUE_IDS[product.is_dishwasher_safe],
+            "value_name": "Sí" if product.is_dishwasher_safe else "No",
+        })
 
     # sale_terms es una clave aparte de "attributes" (confirmado en vivo contra
     # GET /categories/MLA375405/sale_terms) — WARRANTY_TIME necesita value_struct, no

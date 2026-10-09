@@ -238,7 +238,7 @@ class ProductAdmin(admin.ModelAdmin):
             "fields": (
                 "is_available_ml",
                 "ml_item_id", "ml_category_id",
-                "color", "size",
+                "color", "size", "shape", "is_dishwasher_safe",
                 "weight_kg", "length_cm", "width_cm", "height_cm",
                 "gtin", "warranty_months", "free_shipping_seller_paid",
                 "ml_commission_percent", "ml_fixed_fee", "ml_vat_percent",
@@ -248,15 +248,17 @@ class ProductAdmin(admin.ModelAdmin):
             "description": (
                 "Todo lo que hace falta para publicar/actualizar este producto en "
                 "Mercado Libre, junto en un solo lugar: prender/apagar el canal, "
-                "categoría de ML, color y tamaño (se mandan como atributos reales "
-                "COLOR/SIZE de la publicación SOLO si la categoría cargada los admite "
-                "— si no, quedan solo para armar el SKU, sin romper nada; usá la "
-                "acción \"Regenerar SKU\" de la lista si los cargás/cambiás después de "
-                "crear el producto, no se recalcula solo al guardar), dimensiones/peso "
-                "(necesarios para el envío — sin esto ML marca el ítem con specs "
-                "técnicas incompletas), GTIN/garantía/envío gratis (opcionales, "
-                "mejoran la calidad/competitividad de la publicación) y los gastos de "
-                "esta venta para ver la ganancia neta. ml_item_id se completa solo al "
+                "categoría de ML, color/tamaño/forma/apto lavavajillas (se mandan como "
+                "atributos reales de la publicación — COLOR/SIZE/COOKIE_CUTTER_SHAPE/"
+                "IS_DISHWASHER_SAFE — SOLO si la categoría cargada los admite; si no, "
+                "quedan solo informativos (color y tamaño además arman el SKU), sin "
+                "romper nada; usá la acción \"Regenerar SKU\" de la lista si cargás/"
+                "cambiás color o tamaño después de crear el producto, no se recalcula "
+                "solo al guardar), dimensiones/peso (necesarios para el envío — sin "
+                "esto ML marca el ítem con specs técnicas incompletas), GTIN/garantía/"
+                "envío gratis (opcionales, mejoran la calidad/competitividad de la "
+                "publicación) y los gastos de esta venta para ver la ganancia neta. "
+                "ml_item_id se completa solo al "
                 "publicar por primera vez. 'is_available' (arriba) sigue siendo el "
                 "apagado general: si está apagado, no se vende en ningún lado sin "
                 "importar este canal. Después de cambiar cualquier campo de acá corré "
