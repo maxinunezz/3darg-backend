@@ -1,11 +1,12 @@
 from decimal import Decimal
 
 from django.contrib import admin
-from django.forms.models import ModelChoiceIterator
+from django.core.exceptions import ValidationError
+from django.forms.models import BaseInlineFormSet, ModelChoiceIterator
 from django.utils.html import format_html
 from .models import Product, Category, ProductImage
 from .services.presupuestos3d import get_cost
-from mercadolibre.services import sync_product, MLSyncError
+from mercadolibre.services import sync_product, MLSyncError, MIN_ML_PICTURES
 
 
 class _GroupedCategoryIterator(ModelChoiceIterator):
@@ -58,8 +59,51 @@ class _GroupedCategoryIterator(ModelChoiceIterator):
                 yield (self.field.prepare_value(cat), self.field.label_from_instance(cat))
 
 
+class ProductImageInlineFormSet(BaseInlineFormSet):
+    """Exige el piso de fotos de Mercado Libre (MIN_ML_PICTURES, hoy 3) al guardar
+    el producto desde el admin si tiene prendido el canal ML (`is_available_ml`) —
+    mismo criterio que `mercadolibre/services.py::_build_payload()` ya exige recién
+    al publicar, pero acá lo frenamos antes, al guardar, para no dejar cargar un
+    producto "ML-habilitado" que después va a fallar al intentar sincronizarlo.
+
+    Esta validación cruzada no puede ir en `Product.clean()` porque las fotos son
+    un inline: al validarse el form principal del producto, las imágenes todavía
+    no están guardadas (ni el producto tiene pk todavía, si es nuevo). Acá, en
+    cambio, Django ya dejó `is_available_ml` cargado en `self.instance` (lo asigna
+    `_post_clean()` del form principal antes de guardar) y tenemos todas las filas
+    de fotos del formset a mano, incluidas las marcadas para borrar.
+    """
+
+    def clean(self):
+        super().clean()
+        if any(self.errors):
+            return  # ya hay errores de fila individuales, no sumar ruido encima
+        if not getattr(self.instance, "is_available_ml", False):
+            return
+
+        count = 0
+        for form in self.forms:
+            if not hasattr(form, "cleaned_data"):
+                continue
+            cleaned = form.cleaned_data
+            if not cleaned or cleaned.get("DELETE"):
+                continue
+            if cleaned.get("image") and cleaned.get("channel") != ProductImage.Channel.WEB:
+                count += 1
+
+        if count < MIN_ML_PICTURES:
+            raise ValidationError(
+                "Este producto tiene activado el canal Mercado Libre "
+                f"(is_available_ml) — necesita al menos {MIN_ML_PICTURES} fotos "
+                "marcadas para Mercado Libre (canal 'Ambos' o 'Solo Mercado Libre') "
+                f"para poder guardarse. Hoy tiene {count}. Si todavía no tenés las "
+                "fotos listas, desactivá 'is_available_ml' hasta cargarlas."
+            )
+
+
 class ProductImageInline(admin.TabularInline):
     model = ProductImage
+    formset = ProductImageInlineFormSet
     extra = 1
     fields = ["image", "channel", "order", "ml_order", "alt"]
 
@@ -77,6 +121,11 @@ class CategoryAdmin(admin.ModelAdmin):
 class ProductAdmin(admin.ModelAdmin):
     class Media:
         js = ["products/admin/category_cascade.js"]
+
+    # Los productos tocados más recientemente (alta o edición) quedan arriba de
+    # todo — es el orden más útil para el flujo de trabajo diario (ver qué se
+    # cargó/editó último), en vez del alfabético/por id de siempre.
+    ordering = ["-updated_at"]
 
     list_display = [
         "name", "brand", "sku", "price", "member_discount_percent", "members_only",
