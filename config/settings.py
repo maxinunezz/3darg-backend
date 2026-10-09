@@ -91,6 +91,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'corsheaders',
     'rest_framework',
+    'rest_framework.authtoken',  # Token fijo para integraciones server-to-server (ver products/views.py::CosteoSyncAPIView)
     'django_filters',
     'brands',
     'cms',
