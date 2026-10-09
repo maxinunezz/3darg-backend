@@ -59,20 +59,49 @@ class _GroupedCategoryIterator(ModelChoiceIterator):
                 yield (self.field.prepare_value(cat), self.field.label_from_instance(cat))
 
 
-class ProductImageInlineFormSet(BaseInlineFormSet):
-    """Exige el piso de fotos de Mercado Libre (MIN_ML_PICTURES, hoy 3) al guardar
-    el producto desde el admin si tiene prendido el canal ML (`is_available_ml`) —
-    mismo criterio que `mercadolibre/services.py::_build_payload()` ya exige recién
-    al publicar, pero acá lo frenamos antes, al guardar, para no dejar cargar un
-    producto "ML-habilitado" que después va a fallar al intentar sincronizarlo.
-
-    Esta validación cruzada no puede ir en `Product.clean()` porque las fotos son
-    un inline: al validarse el form principal del producto, las imágenes todavía
-    no están guardadas (ni el producto tiene pk todavía, si es nuevo). Acá, en
-    cambio, Django ya dejó `is_available_ml` cargado en `self.instance` (lo asigna
-    `_post_clean()` del form principal antes de guardar) y tenemos todas las filas
-    de fotos del formset a mano, incluidas las marcadas para borrar.
+class _ChannelImageFormSet(BaseInlineFormSet):
+    """Fija `channel` solo en cada fila nueva, según el apartado donde se
+    cargó — ya no hace falta mostrar ese selector en el form: cada apartado
+    (Web / Mercado Libre) filtra y fija su propio canal. Si una foto tiene
+    que verse en los dos canales, se carga una vez en cada apartado (dos
+    filas, mismo archivo).
     """
+
+    channel_value = None  # lo fija cada subclase
+
+    def save_new(self, form, commit=True):
+        obj = super().save_new(form, commit=False)
+        obj.channel = self.channel_value
+        if commit:
+            obj.save()
+        return obj
+
+
+class ProductImageWebFormSet(_ChannelImageFormSet):
+    channel_value = ProductImage.Channel.WEB
+
+
+class ProductImageMLFormSet(_ChannelImageFormSet):
+    """Además de fijar el canal (ver `_ChannelImageFormSet`), exige el piso
+    de fotos de Mercado Libre (MIN_ML_PICTURES, hoy 3) al guardar el
+    producto desde el admin si tiene prendido el canal ML
+    (`is_available_ml`) — mismo criterio que
+    `mercadolibre/services.py::_build_payload()` ya exige recién al
+    publicar, pero acá lo frenamos antes, al guardar, para no dejar cargar
+    un producto "ML-habilitado" que después va a fallar al intentar
+    sincronizarlo.
+
+    Esta validación cruzada no puede ir en `Product.clean()` porque las
+    fotos son un inline: al validarse el form principal del producto, las
+    imágenes todavía no están guardadas (ni el producto tiene pk todavía,
+    si es nuevo). Acá, en cambio, Django ya dejó `is_available_ml` cargado
+    en `self.instance` (lo asigna `_post_clean()` del form principal antes
+    de guardar) y tenemos todas las filas de este formset a mano (que ya
+    son, todas, del canal Mercado Libre — este apartado no maneja fotos de
+    la web), incluidas las marcadas para borrar.
+    """
+
+    channel_value = ProductImage.Channel.ML
 
     def clean(self):
         super().clean()
@@ -88,24 +117,47 @@ class ProductImageInlineFormSet(BaseInlineFormSet):
             cleaned = form.cleaned_data
             if not cleaned or cleaned.get("DELETE"):
                 continue
-            if cleaned.get("image") and cleaned.get("channel") != ProductImage.Channel.WEB:
+            if cleaned.get("image"):
                 count += 1
 
         if count < MIN_ML_PICTURES:
             raise ValidationError(
                 "Este producto tiene activado el canal Mercado Libre "
                 f"(is_available_ml) — necesita al menos {MIN_ML_PICTURES} fotos "
-                "marcadas para Mercado Libre (canal 'Ambos' o 'Solo Mercado Libre') "
-                f"para poder guardarse. Hoy tiene {count}. Si todavía no tenés las "
-                "fotos listas, desactivá 'is_available_ml' hasta cargarlas."
+                f"en el apartado \"Imágenes — Mercado Libre\" para poder guardarse. "
+                f"Hoy tiene {count}. Si todavía no tenés las fotos listas, desactivá "
+                "'is_available_ml' hasta cargarlas."
             )
 
 
-class ProductImageInline(admin.TabularInline):
+class _ChannelImageInline(admin.TabularInline):
+    """Base para los dos apartados de imágenes (Web / Mercado Libre). Cada
+    uno solo lista/edita las filas de `ProductImage` de su propio canal
+    (`get_queryset`); el canal de las filas nuevas lo fija el formset (ver
+    `_ChannelImageFormSet.save_new`), por eso no está en `fields`.
+    """
+
     model = ProductImage
-    formset = ProductImageInlineFormSet
     extra = 1
-    fields = ["image", "channel", "order", "ml_order", "alt"]
+    fields = ["image", "order", "alt"]
+    channel = None  # lo fija cada subclase, debe matchear formset.channel_value
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).filter(channel=self.channel)
+
+
+class ProductImageWebInline(_ChannelImageInline):
+    channel = ProductImage.Channel.WEB
+    formset = ProductImageWebFormSet
+    verbose_name = "Imagen — Página web"
+    verbose_name_plural = "Imágenes — Página web"
+
+
+class ProductImageMLInline(_ChannelImageInline):
+    channel = ProductImage.Channel.ML
+    formset = ProductImageMLFormSet
+    verbose_name = "Imagen — Mercado Libre"
+    verbose_name_plural = "Imágenes — Mercado Libre"
 
 
 @admin.register(Category)
@@ -142,7 +194,7 @@ class ProductAdmin(admin.ModelAdmin):
     search_fields = ["name", "description", "sku", "color", "size"]
     prepopulated_fields = {"slug": ("name",)}
     readonly_fields = ["ml_item_id", "ml_resumen", "web_resumen"]
-    inlines = [ProductImageInline]
+    inlines = [ProductImageWebInline, ProductImageMLInline]
     actions = ["publicar_en_mercadolibre", "regenerar_sku"]
 
     def _channel_resumen(self, obj, channel: str, label: str):
@@ -266,7 +318,7 @@ class ProductAdmin(admin.ModelAdmin):
                 "refleje en la publicación real — no es automático. También se apaga "
                 "solo cuando Mercado Libre nos avisa (webhook) que el ítem ya no está "
                 "activo. Si 'is_available_ml' está prendido, necesitás al menos 3 "
-                "fotos marcadas para Mercado Libre cargadas en la sección de Imágenes "
+                "fotos cargadas en el apartado \"Imágenes — Mercado Libre\" "
                 "más abajo para poder guardar el producto."
             ),
         }),

@@ -652,24 +652,25 @@ class Product(models.Model):
 
 class ProductImage(models.Model):
     class Channel(models.TextChoices):
-        BOTH = "both", "Ambos (web y Mercado Libre)"
-        WEB = "web", "Solo página web"
-        ML = "ml", "Solo Mercado Libre"
+        WEB = "web", "Página web"
+        ML = "ml", "Mercado Libre"
 
     product = models.ForeignKey(Product, related_name="images", on_delete=models.CASCADE)
     image = models.ImageField(upload_to="products/images/")
-    order = models.PositiveIntegerField(default=0, help_text="Orden de la foto en la página web.")
-    ml_order = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        help_text="Orden en la publicación de Mercado Libre, si querés que sea distinto al de la web. Vacío = usa el mismo orden que la web.",
+    order = models.PositiveIntegerField(
+        default=0,
+        help_text="Orden de la foto dentro de su canal (web o Mercado Libre).",
     )
     alt = models.CharField(max_length=200, blank=True)
     channel = models.CharField(
         max_length=10,
         choices=Channel.choices,
-        default=Channel.BOTH,
-        help_text="A dónde se muestra esta foto. 'Ambos' es el comportamiento de siempre.",
+        default=Channel.WEB,
+        help_text=(
+            "A dónde se muestra esta foto. Cada foto pertenece a un solo canal — "
+            "si la necesitás en los dos, cargala dos veces (una en cada apartado "
+            "de Imágenes del admin)."
+        ),
     )
 
     class Meta:

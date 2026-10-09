@@ -63,8 +63,13 @@ def norm_tokens(s):
 
 
 def resolve_roles(resources):
-    """Determina qué recurso va a channel=ml (PNG), cuál a web (primer jpg)
-    y cuáles a both (resto), filtrando archivos sueltos que no correspondan
+    """Determina qué recurso va a channel=ml (PNG), cuál a channel=web
+    (primer jpg) y cuáles son "extra" (resto de los jpg) — estos últimos se
+    cargan EN LOS DOS canales (una fila channel=web y otra channel=ml, mismo
+    archivo) para no perder fotos ML-elegibles respecto al comportamiento
+    viejo (antes existía un tercer canal "both" que cubría este caso; se
+    eliminó a favor de dos apartados channel-puros en el admin, ver
+    `products/admin.py`). Filtra además archivos sueltos que no correspondan
     a este producto (se queda con el código mayoritario entre los recursos)."""
 
     def code_of(public_id):
@@ -96,8 +101,9 @@ def resolve_roles(resources):
 class Command(BaseCommand):
     help = (
         "Trae las fotos de Lumy/Cortantes en Cloudinary y las asigna a cada "
-        "Product (channel ml/web/both según la regla: PNG=ml, primer JPG=web, "
-        "resto=both). Crea los productos/categoría que todavía no existen "
+        "Product (PNG -> channel=ml, primer JPG -> channel=web, resto de JPG "
+        "-> una fila channel=web + una fila channel=ml cada uno, mismo "
+        "archivo). Crea los productos/categoría que todavía no existen "
         "(nombres y precios genéricos, confirmado con el dueño). Re-ejecutable."
     )
 
@@ -229,12 +235,15 @@ class Command(BaseCommand):
 
                 with transaction.atomic():
                     product.images.all().delete()
-                    self._attach(product, ml_r, channel="ml", order=0, ml_order=0)
-                    self._attach(product, web_r, channel="web", order=0, ml_order=0)
+                    self._attach(product, ml_r, channel="ml", order=0)
+                    self._attach(product, web_r, channel="web", order=0)
                     for i, r in enumerate(both_rs, start=1):
-                        self._attach(product, r, channel="both", order=i, ml_order=i)
+                        # Antes era un tercer canal "both" (ver resolve_roles) —
+                        # ahora se carga una fila en cada canal, mismo archivo.
+                        self._attach(product, r, channel="web", order=i)
+                        self._attach(product, r, channel="ml", order=i)
 
-                attached += 2 + len(both_rs)
+                attached += 2 + 2 * len(both_rs)
                 products_touched += 1
 
         self.stdout.write(
@@ -247,9 +256,9 @@ class Command(BaseCommand):
             for path, reason in skipped:
                 self.stdout.write(f"   - {path}: {reason}")
 
-    def _attach(self, product, resource, channel, order, ml_order):
+    def _attach(self, product, resource, channel, order):
         resp = requests.get(resource["secure_url"], timeout=30)
         resp.raise_for_status()
         filename = resource["public_id"].rsplit("/", 1)[-1] + "." + resource["format"]
-        img = ProductImage(product=product, channel=channel, order=order, ml_order=ml_order)
+        img = ProductImage(product=product, channel=channel, order=order)
         img.image.save(filename, ContentFile(resp.content), save=True)

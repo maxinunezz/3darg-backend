@@ -194,17 +194,13 @@ def _build_payload(product):
     if not product.ml_category_id:
         raise MLSyncError("El producto no tiene categoría de Mercado Libre cargada (ml_category_id).")
 
-    ml_images = sorted(
-        product.images.exclude(channel="web"),
-        key=lambda img: img.ml_order if img.ml_order is not None else img.order,
-    )
+    ml_images = product.images.filter(channel="ml").order_by("order")
     pictures = [{"source": image.image.url} for image in ml_images if image.image]
     if len(pictures) < MIN_ML_PICTURES:
         raise MLSyncError(
-            f"El producto necesita al menos {MIN_ML_PICTURES} imágenes marcadas para "
-            "Mercado Libre (canal 'Ambos' o 'Solo Mercado Libre') — Mercado Libre "
-            f"penaliza la calidad de la publicación con menos de {MIN_ML_PICTURES} fotos. "
-            f"Hoy tiene {len(pictures)}."
+            f"El producto necesita al menos {MIN_ML_PICTURES} imágenes en el apartado "
+            "\"Imágenes — Mercado Libre\" — Mercado Libre penaliza la calidad de la "
+            f"publicación con menos de {MIN_ML_PICTURES} fotos. Hoy tiene {len(pictures)}."
         )
 
     payload = {
