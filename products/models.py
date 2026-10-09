@@ -374,9 +374,13 @@ class Product(models.Model):
         help_text=(
             "Si está activo, la publicación de Mercado Libre se marca con envío "
             "gratis y el costo del flete lo absorbe el vendedor — afecta la "
-            "rentabilidad real, es una decisión de pricing, no solo técnica. Si el "
-            "precio ya supera el piso que exige Mercado Libre para la categoría, "
-            "el envío gratis se fuerza solo sin importar este flag. A diferencia de "
+            "rentabilidad real, es una decisión de pricing, no solo técnica. "
+            "OJO: si el precio del producto no alcanza a cubrir el costo de envío, "
+            "Mercado Libre ignora este flag en silencio (no rechaza la publicación, "
+            "pero tampoco activa el envío gratis) — confirmado en vivo, el warning "
+            "que devuelve ML en ese caso (shipping.free_shipping.cost_exceeded) se "
+            "muestra en el admin después de correr la acción \"Publicar/Actualizar "
+            "en Mercado Libre\", prestale atención a ese mensaje. A diferencia de "
             "las dimensiones, este campo SÍ se puede actualizar en publicaciones ya "
             "existentes (no hace falta volver a crear el ítem)."
         ),

@@ -252,6 +252,21 @@ def _build_payload(product):
 ML_ACTIVE_STATUS = "active"
 
 
+def _format_ml_warnings(warnings):
+    """Traduce los `warnings` que ML devuelve en el BODY de una respuesta 200
+    (ej: `shipping.free_shipping.cost_exceeded` cuando el precio es muy bajo
+    para absorber el costo de envío) a mensajes legibles.
+
+    Son distintos de los errores que maneja `_describe_ml_error()`: acá el
+    request en sí fue aceptado (status 2xx, no levanta MLSyncError), pero ML
+    igual puede ignorar en silencio una parte del payload (ej: no activar
+    `free_shipping`) — si no se muestran estos mensajes en algún lado, el
+    campo queda "prendido" en nuestro admin pero sin efecto real en la
+    publicación, sin que nadie se entere.
+    """
+    return [f"{w.get('code', '?')}: {w.get('message', '')}" for w in (warnings or [])]
+
+
 def sync_product(product):
     """Crea o actualiza la publicación de `product` en Mercado Libre.
 
@@ -266,8 +281,11 @@ def sync_product(product):
     prenderse antes). Si está prendido y el ítem venía pausado, esta misma
     llamada lo reactiva.
 
-    Devuelve el ml_item_id. Lanza MLSyncError con mensaje en español ante
-    cualquier problema (sin categoría, sin imágenes, rechazo de la API, etc.).
+    Devuelve `(ml_item_id, warnings)` — `warnings` es una lista (puede estar
+    vacía) de avisos NO bloqueantes que ML devolvió junto con la respuesta
+    200 (ver `_format_ml_warnings`), para mostrarlos en el admin. Lanza
+    MLSyncError con mensaje en español ante cualquier problema bloqueante
+    (sin categoría, sin imágenes, rechazo de la API, etc.).
     """
     if not product.is_available_ml:
         if not product.ml_item_id:
@@ -277,7 +295,7 @@ def sync_product(product):
                 "de publicarlo por primera vez."
             )
         _request("PUT", f"/items/{product.ml_item_id}", json={"status": "paused"})
-        return product.ml_item_id
+        return product.ml_item_id, []
 
     payload = _build_payload(product)
 
@@ -301,11 +319,11 @@ def sync_product(product):
                 update_payload.pop("shipping")
         # Por si el ítem estaba pausado (is_available_ml se acaba de reactivar).
         update_payload["status"] = ML_ACTIVE_STATUS
-        _request("PUT", f"/items/{product.ml_item_id}", json=update_payload)
+        response_data = _request("PUT", f"/items/{product.ml_item_id}", json=update_payload)
         item_id = product.ml_item_id
     else:
-        data = _request("POST", "/items", json=payload)
-        item_id = data["id"]
+        response_data = _request("POST", "/items", json=payload)
+        item_id = response_data["id"]
         product.ml_item_id = item_id
         product.save(update_fields=["ml_item_id"])
 
@@ -315,7 +333,7 @@ def sync_product(product):
         json={"plain_text": _build_description(product)},
     )
 
-    return item_id
+    return item_id, _format_ml_warnings(response_data.get("warnings"))
 
 
 def handle_item_notification(item_id):

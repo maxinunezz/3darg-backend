@@ -327,8 +327,20 @@ class ProductAdmin(admin.ModelAdmin):
         ok, fail = 0, 0
         for product in queryset:
             try:
-                sync_product(product)
+                _, warnings = sync_product(product)
                 ok += 1
+                if warnings:
+                    # ML aceptó el request (sin esto no se levanta MLSyncError) pero
+                    # avisa que ignoró en silencio parte del payload — ej: no pudo
+                    # activar envío gratis porque el precio no alcanza a cubrir el
+                    # costo de envío. Sin este mensaje, el admin queda mostrando el
+                    # campo "prendido" aunque no tenga efecto real en la publicación.
+                    self.message_user(
+                        request,
+                        f"{product.name}: publicado/actualizado, pero Mercado Libre "
+                        "avisó: " + "; ".join(warnings),
+                        level="warning",
+                    )
             except MLSyncError as exc:
                 fail += 1
                 self.message_user(request, f"{product.name}: {exc}", level="error")
