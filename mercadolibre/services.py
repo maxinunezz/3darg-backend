@@ -11,6 +11,17 @@ logger = logging.getLogger(__name__)
 ML_API_BASE = "https://api.mercadolibre.com"
 ML_TOKEN_URL = f"{ML_API_BASE}/oauth/token"
 
+# Mercado Libre penaliza el "quality score" de la publicación con menos de 3 fotos
+# (regla PICTURES_QUANTITY_MIN de GET /items/{id}/performance) — lo exigimos como piso
+# duro acá en vez de dejarlo como sugerencia, para no publicar fichas de baja calidad.
+MIN_ML_PICTURES = 3
+
+# sale_terms.WARRANTY_TYPE para MLA375405 (value_type="list"), confirmado en vivo vía
+# GET /categories/MLA375405/sale_terms con un access_token real — "Garantía del
+# vendedor" es la única opción que tiene sentido acá (no es garantía de fábrica, un
+# tercero no nos la emite).
+ML_WARRANTY_TYPE_SELLER_VALUE_ID = "2230280"
+
 # Margen de seguridad antes de que venza el access_token: lo renovamos un poco
 # antes para no arriesgarnos a que expire a mitad de una sync.
 TOKEN_REFRESH_MARGIN = timezone.timedelta(minutes=5)
@@ -154,10 +165,12 @@ def _build_payload(product):
         key=lambda img: img.ml_order if img.ml_order is not None else img.order,
     )
     pictures = [{"source": image.image.url} for image in ml_images if image.image]
-    if not pictures:
+    if len(pictures) < MIN_ML_PICTURES:
         raise MLSyncError(
-            "El producto necesita al menos una imagen marcada para Mercado Libre "
-            "(canal 'Ambos' o 'Solo Mercado Libre')."
+            f"El producto necesita al menos {MIN_ML_PICTURES} imágenes marcadas para "
+            "Mercado Libre (canal 'Ambos' o 'Solo Mercado Libre') — Mercado Libre "
+            f"penaliza la calidad de la publicación con menos de {MIN_ML_PICTURES} fotos. "
+            f"Hoy tiene {len(pictures)}."
         )
 
     payload = {
@@ -197,15 +210,41 @@ def _build_payload(product):
     if product.length_cm:
         payload["attributes"].append({"id": "DEPTH", "value_name": f"{_fmt_num(product.length_cm)} cm"})
 
+    # GTIN es opcional en esta categoría (no tiene EMPTY_GTIN_REASON) — solo lo mandamos
+    # si el producto tiene un código de barras real cargado. No inventar uno: ML valida
+    # el checksum y rechaza el POST si el formato no es válido.
+    if product.gtin:
+        payload["attributes"].append({"id": "GTIN", "value_name": product.gtin})
+
+    # sale_terms es una clave aparte de "attributes" (confirmado en vivo contra
+    # GET /categories/MLA375405/sale_terms) — WARRANTY_TIME necesita value_struct, no
+    # alcanza con un value_name de texto libre.
+    if product.warranty_months:
+        payload["sale_terms"] = [
+            {
+                "id": "WARRANTY_TYPE",
+                "value_id": ML_WARRANTY_TYPE_SELLER_VALUE_ID,
+                "value_name": "Garantía del vendedor",
+            },
+            {
+                "id": "WARRANTY_TIME",
+                "value_name": f"{product.warranty_months} meses",
+                "value_struct": {"number": product.warranty_months, "unit": "meses"},
+            },
+        ]
+
+    shipping = {}
     if product.weight_kg and product.length_cm and product.width_cm and product.height_cm:
         weight_grams = int(product.weight_kg * 1000)
-        payload["shipping"] = {
-            "mode": "me2",
-            "dimensions": (
-                f"{int(product.length_cm)}x{int(product.width_cm)}x"
-                f"{int(product.height_cm)},{weight_grams}"
-            ),
-        }
+        shipping["mode"] = "me2"
+        shipping["dimensions"] = (
+            f"{int(product.length_cm)}x{int(product.width_cm)}x"
+            f"{int(product.height_cm)},{weight_grams}"
+        )
+    if product.free_shipping_seller_paid:
+        shipping["free_shipping"] = True
+    if shipping:
+        payload["shipping"] = shipping
 
     return payload
 
@@ -243,13 +282,23 @@ def sync_product(product):
     payload = _build_payload(product)
 
     if product.ml_item_id:
-        # family_name, listing_type_id y shipping.dimensions son inmutables una vez creado
-        # el ítem — ML rechaza cualquier PUT que los incluya (BODY_INVALID_FIELDS /
+        # family_name, listing_type_id y shipping.mode/dimensions son inmutables una vez
+        # creado el ítem — ML rechaza cualquier PUT que los incluya (BODY_INVALID_FIELDS /
         # field_not_updatable), incluso si el valor no cambió. Solo van en el POST inicial.
+        # shipping.free_shipping SÍ es mutable (confirmado en vivo), así que lo conservamos
+        # aparte en vez de tirar todo el dict "shipping".
         update_payload = {
             k: v for k, v in payload.items()
-            if k not in ("family_name", "listing_type_id", "shipping")
+            if k not in ("family_name", "listing_type_id")
         }
+        if "shipping" in update_payload:
+            shipping_update = {
+                k: v for k, v in update_payload["shipping"].items() if k == "free_shipping"
+            }
+            if shipping_update:
+                update_payload["shipping"] = shipping_update
+            else:
+                update_payload.pop("shipping")
         # Por si el ítem estaba pausado (is_available_ml se acaba de reactivar).
         update_payload["status"] = ML_ACTIVE_STATUS
         _request("PUT", f"/items/{product.ml_item_id}", json=update_payload)

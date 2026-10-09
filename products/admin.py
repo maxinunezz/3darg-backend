@@ -236,10 +236,16 @@ class ProductAdmin(admin.ModelAdmin):
             ),
         }),
         ("Mercado Libre", {
-            "fields": ("ml_item_id", "ml_category_id", "weight_kg", "length_cm", "width_cm", "height_cm"),
+            "fields": (
+                "ml_item_id", "ml_category_id", "weight_kg", "length_cm", "width_cm", "height_cm",
+                "gtin", "warranty_months", "free_shipping_seller_paid",
+            ),
             "description": (
                 "ml_category_id y las dimensiones/peso son necesarios para publicar. "
-                "ml_item_id se completa solo al publicar por primera vez."
+                "ml_item_id se completa solo al publicar por primera vez. gtin, "
+                "warranty_months y free_shipping_seller_paid son opcionales — mejoran "
+                "la calidad/competitividad de la publicación pero no son obligatorios "
+                "para poder publicar (ver help text de cada campo)."
             ),
         }),
     )

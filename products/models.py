@@ -346,6 +346,41 @@ class Product(models.Model):
     length_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     width_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     height_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    gtin = models.CharField(
+        "GTIN / código de barras",
+        max_length=32,
+        blank=True,
+        help_text=(
+            "Código de barras real del producto (EAN/UPC/ISBN, 8 a 14 dígitos), solo si "
+            "lo tiene. Para piezas artesanales sin código de barras, dejar vacío — "
+            "Mercado Libre valida el checksum y rechaza la publicación si se manda uno "
+            "inventado. Se envía como atributo GTIN del ítem (mejora la calidad de la "
+            "publicación si está disponible, pero no es obligatorio en esta categoría)."
+        ),
+    )
+    warranty_months = models.PositiveSmallIntegerField(
+        "Garantía (meses)",
+        null=True,
+        blank=True,
+        help_text=(
+            "Meses de garantía del vendedor que se informan en la publicación de "
+            "Mercado Libre (sale_terms: WARRANTY_TYPE='Garantía del vendedor' + "
+            "WARRANTY_TIME). Vacío = no se informa garantía en la publicación."
+        ),
+    )
+    free_shipping_seller_paid = models.BooleanField(
+        "Envío gratis (lo paga el vendedor)",
+        default=False,
+        help_text=(
+            "Si está activo, la publicación de Mercado Libre se marca con envío "
+            "gratis y el costo del flete lo absorbe el vendedor — afecta la "
+            "rentabilidad real, es una decisión de pricing, no solo técnica. Si el "
+            "precio ya supera el piso que exige Mercado Libre para la categoría, "
+            "el envío gratis se fuerza solo sin importar este flag. A diferencia de "
+            "las dimensiones, este campo SÍ se puede actualizar en publicaciones ya "
+            "existentes (no hace falta volver a crear el ítem)."
+        ),
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
