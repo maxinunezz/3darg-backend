@@ -12,7 +12,7 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Product, Category, ProductImage
+from .models import Product, Category, ProductImage, CostTemplate, ProductVariant
 from .serializers import ProductSerializer, CategorySerializer
 from brands.models import Brand
 from mercadolibre.services import MLSyncError, sync_product
@@ -189,27 +189,43 @@ class CosteoSyncAPIView(APIView):
 
     La invoca `presupuestos3d` (`config/api_3darg.py::sync_costeo_ecommerce()`)
     cuando se guarda un `Producto` de costeo marcado `es_producto_ecommerce=True`
-    — ese `Producto` representa un TAMAÑO de costeo compartido por muchos
-    diseños distintos del catálogo (ej: "cortante mediano"), no un producto
-    puntual. Por eso esta vista actualiza en bloque TODOS los `Product` de
-    `3darg-backend` que tengan ese mismo `cutter_size`, sin importar marca,
-    categoría o diseño — mismo criterio de agrupación que ya usa
-    `Product.cost_sku()`/`COST_SKU_BY_CUTTER_SIZE`, pero de "push" en vez de
-    "pull" y además de precio: ahora también medidas.
+    — ese `Producto` representa un PRESUPUESTO de costeo compartido por muchos
+    diseños distintos del catálogo (ej: "Cortante 4cm", "Shaker grande"), no
+    un producto puntual. Por eso esta vista no toca `Product`/`ProductVariant`
+    por nombre ni por tag: hace upsert de un `CostTemplate` por `external_ref`
+    (referencia estable que no cambia si renombran el presupuesto allá) y
+    propaga el precio/medidas nuevos a TODAS las `ProductVariant` que ya
+    estén vinculadas a ese template — vínculo que se arma a mano, por
+    producto, desde el admin de 3darg-backend (`ProductVariant.cost_template`).
 
     Payload esperado (JSON):
-      - `cutter_size` (obligatorio): uno de `Product.CutterSize.values`.
-      - `sale_price` (obligatorio): precio de venta, mismo valor para todos
-        los productos de ese tamaño.
+      - `external_ref` (obligatorio): referencia estable del `Producto` de
+        costeo en presupuestos3d (ej: `"presupuestos3d:42"`). Es la clave de
+        upsert del `CostTemplate` — no el nombre, que puede cambiar.
+      - `nombre` (obligatorio): nombre a mostrar del template (se actualiza
+        en cada sync, así un rename en presupuestos3d se refleja acá).
+      - `sale_price` (obligatorio): precio de venta a propagar a las
+        variantes vinculadas.
       - `weight_kg`/`length_cm`/`width_cm`/`height_cm` (opcionales): si no
         vienen, no se tocan (no se asume que faltan = "borrar medida").
 
-    A propósito NO se tocan `category`/`sku`/`ml_category_id` acá — esos son
-    del diseño puntual, no del tamaño, y pisarlos en bloque rompería el
-    catálogo (ver conversación de diseño). Tampoco crea productos nuevos:
-    solo actualiza los que ya existen con ese `cutter_size` cargado.
+    A propósito NO se tocan `category`/`sku`/`ml_category_id` de ningún
+    `Product` — esos son del diseño puntual, no del template compartido, y
+    pisarlos en bloque rompería el catálogo. Tampoco crea `Product`/
+    `ProductVariant` nuevos: solo actualiza las variantes que ya están
+    vinculadas al template (si todavía no hay ninguna, `actualizados` da 0 —
+    es esperable para un template recién creado hasta que alguien lo asigne
+    desde el admin).
 
-    Si algún producto afectado tiene `is_available_ml=True`, además se
+    Fase 1: cada `ProductVariant` corresponde 1:1 a un `Product` (ver
+    migración `0035_migrar_productos_a_variantes_y_costtemplate`), y nada del
+    checkout/Mercado Libre/el feed lee `ProductVariant` todavía — por eso acá
+    se actualiza la variante Y el `Product` subyacente en el mismo golpe,
+    para que el precio nuevo tenga efecto real hoy mismo. Cuando el catálogo
+    tenga variantes de verdad (fases siguientes), este espejo deja de hacer
+    falta.
+
+    Si algún `Product` afectado tiene `is_available_ml=True`, además se
     vuelve a publicar en Mercado Libre (`sync_product()`) para que el precio
     y las medidas nuevas lleguen a la publicación real sin acción manual —
     los errores de un producto puntual (ej: le faltan fotos) no frenan al
@@ -225,11 +241,17 @@ class CosteoSyncAPIView(APIView):
     permission_classes = [IsAdminUser]
 
     def post(self, request, *args, **kwargs):
-        cutter_size = request.data.get("cutter_size")
-        valid_sizes = dict(Product.CutterSize.choices)
-        if cutter_size not in valid_sizes:
+        external_ref = request.data.get("external_ref")
+        if not external_ref:
             return Response(
-                {"error": f"cutter_size inválido. Opciones: {', '.join(valid_sizes)}"},
+                {"error": "external_ref es obligatorio."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        nombre = request.data.get("nombre")
+        if not nombre:
+            return Response(
+                {"error": "nombre es obligatorio."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -242,28 +264,38 @@ class CosteoSyncAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        update_kwargs = {"price": sale_price}
+        measurement_updates = {}
         for field in _MEASUREMENT_FIELDS:
             raw = request.data.get(field)
             if raw is None or raw == "":
                 continue
             try:
-                update_kwargs[field] = Decimal(str(raw))
+                measurement_updates[field] = Decimal(str(raw))
             except InvalidOperation:
                 return Response(
                     {"error": f"{field} tiene que ser numérico."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        affected_ids = list(Product.objects.filter(cutter_size=cutter_size).values_list("pk", flat=True))
-        if not affected_ids:
+        template, _created = CostTemplate.objects.update_or_create(
+            external_ref=external_ref,
+            defaults={"nombre": nombre, "sale_price": sale_price, **measurement_updates},
+        )
+
+        variant_qs = ProductVariant.objects.filter(cost_template=template)
+        product_ids = list(variant_qs.values_list("product_id", flat=True).distinct())
+        if not product_ids:
             return Response({"actualizados": 0, "ml_republicados": 0, "ml_errores": []})
 
-        Product.objects.filter(pk__in=affected_ids).update(**update_kwargs)
+        variant_update_kwargs = {"price": sale_price, **measurement_updates}
+        variant_qs.update(**variant_update_kwargs)
+
+        product_update_kwargs = {"price": sale_price, **measurement_updates}
+        Product.objects.filter(pk__in=product_ids).update(**product_update_kwargs)
 
         ml_ok = []
         ml_errores = []
-        for product in Product.objects.filter(pk__in=affected_ids, is_available_ml=True):
+        for product in Product.objects.filter(pk__in=product_ids, is_available_ml=True):
             try:
                 sync_product(product)
                 ml_ok.append(product.sku)
@@ -277,7 +309,7 @@ class CosteoSyncAPIView(APIView):
                 ml_errores.append({"sku": product.sku, "error": "Error inesperado, ver logs del servidor."})
 
         return Response({
-            "actualizados": len(affected_ids),
+            "actualizados": len(product_ids),
             "ml_republicados": len(ml_ok),
             "ml_errores": ml_errores,
         })

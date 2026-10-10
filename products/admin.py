@@ -1,10 +1,14 @@
 from decimal import Decimal
 
+from django import forms
 from django.contrib import admin
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.core.exceptions import ValidationError
 from django.forms.models import BaseInlineFormSet, ModelChoiceIterator
+from django.shortcuts import render
+from django.urls import reverse
 from django.utils.html import format_html
-from .models import Product, Category, ProductImage
+from .models import Product, Category, ProductImage, CostTemplate, ProductVariant
 from .services.presupuestos3d import get_cost
 from mercadolibre.services import sync_product, MLSyncError, MIN_ML_PICTURES
 
@@ -160,6 +164,146 @@ class ProductImageMLInline(_ChannelImageInline):
     verbose_name_plural = "Imágenes — Mercado Libre"
 
 
+@admin.register(CostTemplate)
+class CostTemplateAdmin(admin.ModelAdmin):
+    """Plantillas de costo (`CostTemplate`): el "presupuesto de ecommerce"
+    de presupuestos3d, del lado de 3darg-backend. Se crean solas vía el sync
+    automático (`CosteoSyncAPIView`, upsert por `external_ref`) o a mano acá
+    para variantes con precio propio que igual querés agrupar — lo que
+    vincula de verdad un template a muchos productos es asignarlo desde
+    `ProductVariantAdmin` (ver la acción "Asignar template de costo").
+    """
+
+    list_display = ["nombre", "sale_price", "external_ref", "legacy_cutter_size", "variantes_count", "updated_at"]
+    search_fields = ["nombre", "external_ref"]
+    list_filter = ["legacy_cutter_size"]
+    readonly_fields = ["legacy_cutter_size", "created_at", "updated_at", "variantes_vinculadas"]
+    fieldsets = (
+        (None, {
+            "fields": ("nombre", "external_ref", "sale_price"),
+            "description": (
+                "`external_ref` lo completa solo el sync de presupuestos3d (no lo "
+                "edites a mano si este template viene de ahí: es la clave que usa "
+                "para hacer upsert sin duplicar — renombrar `nombre` en presupuestos3d "
+                "no rompe el link). Dejalo vacío para un template armado acá nomás, "
+                "sin sync automático."
+            ),
+        }),
+        ("Medidas", {"fields": ("weight_kg", "length_cm", "width_cm", "height_cm")}),
+        ("Variantes vinculadas", {"fields": ("variantes_vinculadas",)}),
+        ("Trazabilidad", {
+            "fields": ("legacy_cutter_size", "created_at", "updated_at"),
+            "classes": ("collapse",),
+        }),
+    )
+
+    @admin.display(description="Variantes")
+    def variantes_count(self, obj):
+        return obj.variants.count()
+
+    @admin.display(description="Variantes que usan este template")
+    def variantes_vinculadas(self, obj):
+        if not obj or not obj.pk:
+            return "Guardá el template primero."
+        variantes = list(obj.variants.select_related("product")[:50])
+        if not variantes:
+            return (
+                "Ninguna variante usa este template todavía — asignalo desde "
+                "\"Variantes de producto\" (acción \"Asignar template de costo "
+                "a las variantes seleccionadas\")."
+            )
+        total = obj.variants.count()
+        items = "".join(
+            format_html(
+                '<li><a href="{}">{}</a> — ${}</li>',
+                reverse("admin:products_productvariant_change", args=[v.pk]),
+                str(v),
+                v.price,
+            )
+            for v in variantes
+        )
+        extra = f"<li>… y {total - 50} más.</li>" if total > 50 else ""
+        return format_html("<ul>{}{}</ul>", items, extra)
+
+
+class AsignarCostTemplateForm(forms.Form):
+    cost_template = forms.ModelChoiceField(
+        queryset=CostTemplate.objects.all(),
+        label="Template de costo a asignar",
+        help_text=(
+            "Se asigna a TODAS las variantes seleccionadas de una sola vez — así "
+            "un presupuesto cargado una vez en presupuestos3d aplica a muchos "
+            "productos del catálogo. Si el template ya tiene 'Precio de venta' "
+            "cargado, también se actualiza el precio de cada variante y del "
+            "Product subyacente (mismo criterio que usa el sync automático de "
+            "presupuestos3d, ver CosteoSyncAPIView)."
+        ),
+    )
+
+
+@admin.register(ProductVariant)
+class ProductVariantAdmin(admin.ModelAdmin):
+    """Variantes de catálogo. Fase 1: hay exactamente una por `Product`
+    (migración `0035_migrar_productos_a_variantes_y_costtemplate`) y nada del
+    checkout/Mercado Libre/el feed la lee todavía — pero ya se puede usar este
+    admin para ir vinculando variantes a un `CostTemplate` compartido, que es
+    justamente lo que necesita el sync de presupuestos3d para encontrar a
+    quién aplicarle el precio.
+    """
+
+    list_display = [
+        "__str__", "product", "sku", "price", "stock", "cost_template", "is_available",
+    ]
+    list_filter = ["cost_template", "is_available", "product__brand"]
+    search_fields = ["sku", "product__name", "product__sku", "color", "size"]
+    list_editable = ["price", "stock", "is_available"]
+    autocomplete_fields = ["product", "cost_template"]
+    actions = ["asignar_cost_template"]
+
+    @admin.action(description="Asignar template de costo a las variantes seleccionadas")
+    def asignar_cost_template(self, request, queryset):
+        if "apply" in request.POST:
+            form = AsignarCostTemplateForm(request.POST)
+            if form.is_valid():
+                template = form.cleaned_data["cost_template"]
+                update_kwargs = {"cost_template": template}
+                if template.sale_price is not None:
+                    update_kwargs["price"] = template.sale_price
+                queryset.update(**update_kwargs)
+
+                if template.sale_price is not None:
+                    # Fase 1: el Product subyacente sigue siendo lo que lee
+                    # el carrito/ML/feed — se actualiza en el mismo golpe
+                    # para que el precio nuevo tenga efecto real hoy mismo
+                    # (ver CosteoSyncAPIView, mismo criterio).
+                    product_ids = list(queryset.values_list("product_id", flat=True).distinct())
+                    Product.objects.filter(pk__in=product_ids).update(price=template.sale_price)
+
+                mensaje = (
+                    f'{queryset.count()} variante(s) asignada(s) al template "{template.nombre}"'
+                )
+                if template.sale_price is not None:
+                    mensaje += f", precio actualizado a ${template.sale_price}."
+                else:
+                    mensaje += " (el template no tiene precio cargado, no se tocó el precio de las variantes)."
+                self.message_user(request, mensaje)
+                return None
+        else:
+            form = AsignarCostTemplateForm()
+
+        return render(
+            request,
+            "admin/products/productvariant/asignar_cost_template.html",
+            {
+                "variantes": queryset,
+                "form": form,
+                "title": "Asignar template de costo",
+                "action_checkbox_name": ACTION_CHECKBOX_NAME,
+                "opts": self.model._meta,
+            },
+        )
+
+
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
     list_display = ["id", "name", "slug", "brand", "parent", "sku_prefix"]
@@ -193,7 +337,7 @@ class ProductAdmin(admin.ModelAdmin):
     ]
     search_fields = ["name", "description", "sku", "color", "size"]
     prepopulated_fields = {"slug": ("name",)}
-    readonly_fields = ["ml_item_id", "ml_resumen", "web_resumen"]
+    readonly_fields = ["ml_item_id", "ml_resumen", "web_resumen", "variante_resumen"]
     inlines = [ProductImageWebInline, ProductImageMLInline]
     actions = ["publicar_en_mercadolibre", "regenerar_sku"]
 
@@ -237,6 +381,30 @@ class ProductAdmin(admin.ModelAdmin):
     def web_resumen(self, obj):
         return self._channel_resumen(obj, "web", "Página web")
 
+    @admin.display(description="Variante / template de costo")
+    def variante_resumen(self, obj):
+        """Fase 1: cada Product tiene exactamente una ProductVariant (ver
+        migración 0035). Este resumen es solo un atajo de navegación hacia
+        el admin de ProductVariant — el precio/stock que de verdad se usa
+        hoy en el carrito/ML/el feed sigue siendo el de este Product de
+        acá arriba, no el de la variante (eso cambia en una fase siguiente).
+        """
+        if not obj or not obj.pk:
+            return "Guardá el producto primero para ver su variante."
+        variant = obj.variants.first()
+        if not variant:
+            return "Sin variante todavía (debería tener una, ver migración 0035)."
+        url = reverse("admin:products_productvariant_change", args=[variant.pk])
+        if variant.cost_template:
+            template_url = reverse("admin:products_costtemplate_change", args=[variant.cost_template.pk])
+            detalle = format_html(
+                'template <a href="{}">{}</a>',
+                template_url, variant.cost_template.nombre,
+            )
+        else:
+            detalle = "sin template — precio propio"
+        return format_html('<a href="{}">{}</a> — {}', url, str(variant), detalle)
+
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         field = super().formfield_for_foreignkey(db_field, request, **kwargs)
         if db_field.name == "category":
@@ -260,13 +428,20 @@ class ProductAdmin(admin.ModelAdmin):
             ),
         }),
         ("Precio y stock", {
-            "fields": ("price", "stock", "cutter_size", "is_available", "is_featured"),
+            "fields": ("price", "stock", "cutter_size", "is_available", "is_featured", "variante_resumen"),
             "description": (
                 "'Tamaño de cortante' es el tamaño de COSTEO (la pieza, no "
                 "el diseño) — determina qué costo se trae de presupuestos3d "
                 "para calcular la ganancia neta de cada canal más abajo. No "
                 "tiene efecto en productos que no sean cortantes (dejalo "
-                "vacío en ese caso)."
+                "vacío en ese caso). 'Variante / template de costo' es un "
+                "atajo a la ProductVariant de este producto — ahí (o en bloque, "
+                "desde \"Variantes de producto\" en el menú del admin) se "
+                "asigna un CostTemplate compartido por muchos productos, que "
+                "es lo que usa el sync de precios de presupuestos3d para saber "
+                "a quién aplicarle un presupuesto. Por ahora el precio/stock "
+                "que de verdad se vende sigue siendo el de arriba, no el de "
+                "la variante (eso cambia en una fase siguiente)."
             ),
         }),
         ("Página web — todo lo que necesita este canal", {

@@ -650,6 +650,158 @@ class Product(models.Model):
         return (ganancia / self.price * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
 
 
+class CostTemplate(models.Model):
+    """"Plantilla de costo" compartida por muchas variantes de catálogo.
+
+    Es el equivalente, del lado de 3darg-backend, a un `Producto` de costeo
+    marcado `es_producto_ecommerce=True` en presupuestos3d (ej: "Cortante
+    4cm", "Shaker grande"): un perfil de costo/precio que aplica a MUCHOS
+    `ProductVariant` sin importar diseño, marca o categoría — se carga el
+    presupuesto una sola vez ahí y se propaga a cada variante que lo
+    referencie (`ProductVariant.cost_template`).
+
+    No reemplaza `Product.cutter_size` (sigue existiendo sin tocar, es el
+    mecanismo viejo de costeo "por tag" que usa `CosteoSyncAPIView`) — lo
+    sucede: la migración `0034_crear_productvariant_y_costtemplate` crea un
+    `CostTemplate` por cada valor de `cutter_size` en uso (`legacy_cutter_size`)
+    para no perder la agrupación histórica, dejando `sale_price` vacío (no
+    se fuerza un precio único retroactivo sobre variantes que hoy pueden
+    tener precios distintos a pesar de compartir tamaño de costeo).
+    """
+
+    nombre = models.CharField(
+        max_length=100,
+        unique=True,
+        help_text=(
+            "Nombre del presupuesto/perfil de costo, tal como se carga en "
+            "presupuestos3d (ej: \"Cortante 4cm\", \"Shaker grande\"). Libre, "
+            "sin límite de cantidad — a diferencia del viejo cutter_size, no "
+            "está atado a un enum fijo de 5 valores."
+        ),
+    )
+    external_ref = models.CharField(
+        max_length=64,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text=(
+            "Referencia estable del Producto de costeo en presupuestos3d que "
+            "originó este template (la que viaja en el payload del sync). Se "
+            "usa para hacer upsert por ID en vez de por nombre, así renombrar "
+            "el presupuesto en presupuestos3d no rompe el link. Vacío en los "
+            "templates migrados desde cutter_size (todavía no vienen de un "
+            "sync real)."
+        ),
+    )
+    sale_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text=(
+            "Precio de venta a aplicar a todos los ProductVariant que "
+            "referencien este template. Vacío = todavía no se sincronizó "
+            "ningún precio desde presupuestos3d para este template (las "
+            "variantes conservan su propio precio actual, sin tocarlo)."
+        ),
+    )
+    weight_kg = models.DecimalField(max_digits=6, decimal_places=3, null=True, blank=True)
+    length_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    width_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    height_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    legacy_cutter_size = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text=(
+            "Valor de Product.cutter_size que originó este template en la "
+            "migración inicial (0034) — solo trazabilidad histórica, no se "
+            "usa en ningún cálculo nuevo."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["nombre"]
+        verbose_name = "Plantilla de costo"
+        verbose_name_plural = "Plantillas de costo"
+
+    def __str__(self):
+        return self.nombre
+
+
+class ProductVariant(models.Model):
+    """Unidad vendible real de un `Product` (el diseño/modelo).
+
+    `Product` sigue siendo "la ficha" del diseño — nombre, categoría, marca,
+    fotos, publicación en Mercado Libre/feed. `ProductVariant` es el
+    tamaño/color puntual que se vende, con su propio precio/stock/SKU.
+
+    Fase 1: cada `Product` existente tiene EXACTAMENTE una variante
+    (migración 1:1, ver `0034_crear_productvariant_y_costtemplate.py`) — por
+    ahora nada del resto del sistema (cart, orders, Mercado Libre, el feed)
+    lee este modelo todavía, así que crearlo no cambia ningún comportamiento
+    actual. Las fases siguientes conectan ML/feed/cart/checkout a este
+    modelo y recién ahí un mismo `Product` puede tener variantes reales de
+    color/tamaño con stock propio.
+    """
+
+    product = models.ForeignKey(
+        Product,
+        related_name="variants",
+        on_delete=models.CASCADE,
+    )
+    color = models.CharField(max_length=50, blank=True)
+    size = models.CharField("Tamaño", max_length=50, blank=True)
+    sku = models.CharField(max_length=64, unique=True, blank=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    stock = models.PositiveIntegerField(default=0)
+    cost_template = models.ForeignKey(
+        CostTemplate,
+        related_name="variants",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        help_text=(
+            "Presupuesto de presupuestos3d del que toma precio/medidas esta "
+            "variante. Vacío = variante con precio propio, no ligada a "
+            "ningún presupuesto compartido (ej: producto a medida)."
+        ),
+    )
+    weight_kg = models.DecimalField(max_digits=6, decimal_places=3, null=True, blank=True)
+    length_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    width_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    height_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    gtin = models.CharField("GTIN / código de barras", max_length=32, blank=True)
+    is_available = models.BooleanField(default=True)
+    ml_variation_id = models.CharField(
+        max_length=32,
+        blank=True,
+        help_text=(
+            "ID de la variación en Mercado Libre, para cuando el ítem tenga "
+            "variaciones reales publicadas (no usado todavía, Fase 1 publica "
+            "igual que siempre a nivel Product)."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["product", "color", "size"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "color", "size"],
+                name="unique_variant_per_product_color_size",
+            ),
+        ]
+        verbose_name = "Variante de producto"
+        verbose_name_plural = "Variantes de producto"
+
+    def __str__(self):
+        etiqueta = " / ".join(filter(None, [self.color, self.size])) or "única"
+        return f"{self.product.name} ({etiqueta})"
+
+
 class ProductImage(models.Model):
     class Channel(models.TextChoices):
         WEB = "web", "Página web"
