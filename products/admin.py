@@ -324,7 +324,7 @@ class ProductAdmin(admin.ModelAdmin):
     ordering = ["-updated_at"]
 
     list_display = [
-        "name", "brand", "sku", "price", "member_discount_percent", "members_only",
+        "name", "brand", "sku", "price", "ml_price", "member_discount_percent", "members_only",
         "stock", "is_available", "is_available_web", "is_available_ml", "is_featured",
     ]
     list_filter = [
@@ -350,6 +350,12 @@ class ProductAdmin(admin.ModelAdmin):
         if obj is None or not obj.pk:
             return "Guardá el producto primero para ver este resumen."
 
+        precio = obj.sale_price_for(channel)
+        if channel == "ml" and obj.ml_price is not None:
+            precio_str = f"${precio:.2f} (precio propio de ML)"
+        else:
+            precio_str = f"${precio:.2f} (= precio de la web)"
+
         cost = None
         costeo_sku = obj.cost_sku()
         if costeo_sku:
@@ -367,10 +373,11 @@ class ProductAdmin(admin.ModelAdmin):
             ganancia_str = "no se puede calcular (falta el costo de presupuestos3d)"
 
         return format_html(
+            "<strong>Precio usado:</strong> {} &nbsp;|&nbsp; "
             "<strong>Costo (presupuestos3d):</strong> {} &nbsp;|&nbsp; "
             "<strong>Gastos de {}:</strong> ${} &nbsp;|&nbsp; "
             "<strong>Ganancia neta:</strong> {}",
-            costo_str, label, f"{gastos:.2f}", ganancia_str,
+            precio_str, costo_str, label, f"{gastos:.2f}", ganancia_str,
         )
 
     @admin.display(description="Resumen Mercado Libre")
@@ -464,7 +471,7 @@ class ProductAdmin(admin.ModelAdmin):
         ("Mercado Libre — todo lo que necesita este canal", {
             "fields": (
                 "is_available_ml",
-                "ml_item_id", "ml_category_id",
+                "ml_item_id", "ml_category_id", "ml_price",
                 "color", "size", "shape", "is_dishwasher_safe",
                 "weight_kg", "length_cm", "width_cm", "height_cm",
                 "gtin", "warranty_months", "free_shipping_seller_paid",
@@ -475,7 +482,10 @@ class ProductAdmin(admin.ModelAdmin):
             "description": (
                 "Todo lo que hace falta para publicar/actualizar este producto en "
                 "Mercado Libre, junto en un solo lugar: prender/apagar el canal, "
-                "categoría de ML, color/tamaño/forma/apto lavavajillas (se mandan como "
+                "categoría de ML, 'Precio Mercado Libre' (opcional — vacío = se "
+                "publica al mismo precio que la web; cargalo solo si querés cobrar "
+                "distinto en ML, por ejemplo para compensar su comisión más alta), "
+                "color/tamaño/forma/apto lavavajillas (se mandan como "
                 "atributos reales de la publicación — COLOR/SIZE/COOKIE_CUTTER_SHAPE/"
                 "IS_DISHWASHER_SAFE — SOLO si la categoría cargada los admite; si no, "
                 "quedan solo informativos (color y tamaño además arman el SKU), sin "
@@ -484,7 +494,9 @@ class ProductAdmin(admin.ModelAdmin):
                 "solo al guardar), dimensiones/peso (necesarios para el envío — sin "
                 "esto ML marca el ítem con specs técnicas incompletas), GTIN/garantía/"
                 "envío gratis (opcionales, mejoran la calidad/competitividad de la "
-                "publicación) y los gastos de esta venta para ver la ganancia neta. "
+                "publicación) y los gastos de esta venta para ver la ganancia neta "
+                "(calculada sobre 'Precio Mercado Libre' si lo cargaste, si no sobre "
+                "el precio de la web). "
                 "ml_item_id se completa solo al "
                 "publicar por primera vez. 'is_available' (arriba) sigue siendo el "
                 "apagado general: si está apagado, no se vende en ningún lado sin "

@@ -200,6 +200,25 @@ class Product(models.Model):
     )
     description = models.TextField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
+    ml_price = models.DecimalField(
+        "Precio Mercado Libre",
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text=(
+            "Precio a publicar en Mercado Libre, si querés que sea distinto "
+            "del precio de la web ('price', arriba). Vacío = se usa el "
+            "mismo precio en los dos canales (comportamiento de siempre). "
+            "Pensado para compensar que Mercado Libre cobra más comisión/"
+            "impuestos que una venta directa desde la web: cargá acá el "
+            "precio que querés cobrar puntualmente en ML y el resumen de "
+            "más abajo te muestra la ganancia neta resultante. `price` "
+            "sigue siendo la base: es el que manda presupuestos3d en cada "
+            "sync y el que se usa siempre en la web. Si volvés a dejar "
+            "este campo vacío, ML vuelve a usar 'price' automáticamente."
+        ),
+    )
     stock = models.PositiveIntegerField(default=0)
     cutter_size = models.CharField(
         "Tamaño de cortante",
@@ -612,42 +631,61 @@ class Product(models.Model):
             return None
         return self.COST_SKU_BY_CUTTER_SIZE.get(self.cutter_size)
 
+    def sale_price_for(self, channel: str) -> Decimal:
+        """Precio de venta efectivo para `channel` ('ml' o 'web').
+
+        Hoy solo Mercado Libre puede diferenciarse: si `ml_price` está
+        cargado, se usa ese; si no, se cae al `price` general (mismo
+        comportamiento que antes de que existiera `ml_price`). La web
+        siempre usa `price` — no hay (todavía) un `web_price` propio,
+        porque `price` YA ES el precio de la web.
+        """
+        if channel == "ml" and self.ml_price is not None:
+            return self.ml_price
+        return self.price
+
     def channel_total_expenses(self, channel: str) -> Decimal:
         """Suma de todos los gastos de vender este producto por `channel`
         ('ml' o 'web'): comisión + IVA + Ingresos Brutos + otro costo
-        variable (los cuatro en % sobre `price`) más el cargo fijo y el
-        costo de envío (ambos en $). Fuente de verdad de "Total de gastos
-        del canal" en la pantalla de Precio/Stock/Canales del admin.
+        variable (los cuatro en % sobre el precio efectivo del canal, ver
+        `sale_price_for()`) más el cargo fijo y el costo de envío (ambos en
+        $). Fuente de verdad de "Total de gastos del canal" en la pantalla
+        de Precio/Stock/Canales del admin.
         """
+        precio = self.sale_price_for(channel)
         percent_total = (
             getattr(self, f"{channel}_commission_percent")
             + getattr(self, f"{channel}_vat_percent")
             + getattr(self, f"{channel}_gross_income_tax_percent")
             + getattr(self, f"{channel}_other_variable_percent")
         )
-        variable = self.price * percent_total / Decimal(100)
+        variable = precio * percent_total / Decimal(100)
         fixed = getattr(self, f"{channel}_fixed_fee") + getattr(self, f"{channel}_shipping_cost")
         return (variable + fixed).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     def channel_net_profit(self, channel: str, cost: Decimal | None) -> Decimal | None:
-        """Ganancia neta ($) vendiendo por `channel`: price - cost - gastos
-        del canal. `cost` viene de presupuestos3d (ver
+        """Ganancia neta ($) vendiendo por `channel`: precio efectivo del
+        canal (ver `sale_price_for()`) - cost - gastos del canal. `cost`
+        viene de presupuestos3d (ver
         `products/services/presupuestos3d.py::get_cost()`) — si no está
         disponible, no se puede calcular la ganancia real y se devuelve
         `None` (el admin muestra "costo no disponible" en ese caso).
         """
         if cost is None:
             return None
+        precio = self.sale_price_for(channel)
         gastos = self.channel_total_expenses(channel)
-        return (self.price - cost - gastos).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return (precio - cost - gastos).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     def channel_net_profit_percent(self, channel: str, cost: Decimal | None) -> Decimal | None:
-        """Ganancia neta como % de `price`. `None` si falta el costo o si
-        `price` es 0 (no se puede expresar un % sobre precio cero)."""
-        if cost is None or not self.price:
+        """Ganancia neta como % del precio efectivo del canal (ver
+        `sale_price_for()`). `None` si falta el costo o si ese precio es 0
+        (no se puede expresar un % sobre precio cero)."""
+        precio = self.sale_price_for(channel)
+        if cost is None or not precio:
             return None
         ganancia = self.channel_net_profit(channel, cost)
-        return (ganancia / self.price * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        return (ganancia / precio * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
 
 
 class CostTemplate(models.Model):

@@ -210,7 +210,7 @@ def _build_payload(product):
         # queda igual al family_name, así que acá va directo el texto SEO ya armado.
         "family_name": _build_title(product),
         "category_id": product.ml_category_id,
-        "price": float(product.price),
+        "price": float(product.sale_price_for("ml")),
         "currency_id": "ARS",
         "available_quantity": product.stock,
         "condition": "new",
