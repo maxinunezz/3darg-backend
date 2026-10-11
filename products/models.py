@@ -768,6 +768,12 @@ class CostTemplate(models.Model):
         return self.nombre
 
 
+# Campos de medidas que se heredan del CostTemplate a la variante/producto en
+# ProductVariant.save() — mismo set que usa CosteoSyncAPIView (`_MEASUREMENT_FIELDS`
+# en products/views.py) para no duplicar criterio de qué es "medida del template".
+_COST_TEMPLATE_MEASUREMENT_FIELDS = ("weight_kg", "length_cm", "width_cm", "height_cm")
+
+
 class ProductVariant(models.Model):
     """Unidad vendible real de un `Product` (el diseño/modelo).
 
@@ -840,28 +846,41 @@ class ProductVariant(models.Model):
         return f"{self.product.name} ({etiqueta})"
 
     def save(self, *args, **kwargs):
-        """Si la variante está vinculada a un `CostTemplate` con precio
-        cargado, su precio (y el del `Product` subyacente, mientras dure la
-        Fase 1) siempre refleja `cost_template.sale_price` — sin importar si
+        """Si la variante está vinculada a un `CostTemplate`, hereda de ahí
+        precio y medidas (peso/largo/ancho/alto) — y las refleja también en
+        el `Product` subyacente, mientras dure la Fase 1 — sin importar si
         el guardado viene del form de edición normal, del shell, de
         `list_editable` o de una API. Esto evita que un vínculo hecho fuera
         de la acción "Asignar template de costo..." (la única que antes
-        copiaba el precio a mano) deje el precio desactualizado en silencio
-        — exactamente lo que pasó con "Adorno Bola": se vinculó el template
-        editando la variante directo en vez de usar esa acción, y el precio
-        nunca se propagó.
+        copiaba estos datos a mano) deje la variante/producto desactualizados
+        en silencio — exactamente lo que pasó con "Adorno Bola": se vinculó
+        el template editando la variante directo y el precio nunca se
+        propagó.
 
-        `CosteoSyncAPIView` y la acción de admin siguen actualizando el
-        precio con `.update()` a propósito (son operaciones en bloque sobre
+        Igual que `CosteoSyncAPIView`, cada campo del template se copia solo
+        si está cargado (`is not None`) — un template con una medida vacía no
+        borra la medida que ya tenía la variante.
+
+        `CosteoSyncAPIView` y la acción de admin siguen actualizando estos
+        campos con `.update()` a propósito (son operaciones en bloque sobre
         muchas variantes a la vez, no pasan por este `save()` uno por uno) —
         esta lógica cubre el resto de los casos, que antes no tenían ninguna
         garantía.
         """
-        if self.cost_template_id and self.cost_template.sale_price is not None:
-            self.price = self.cost_template.sale_price
+        update_kwargs = {}
+        if self.cost_template_id:
+            template = self.cost_template
+            if template.sale_price is not None:
+                self.price = template.sale_price
+                update_kwargs["price"] = template.sale_price
+            for field in _COST_TEMPLATE_MEASUREMENT_FIELDS:
+                value = getattr(template, field)
+                if value is not None:
+                    setattr(self, field, value)
+                    update_kwargs[field] = value
         super().save(*args, **kwargs)
-        if self.cost_template_id and self.cost_template.sale_price is not None:
-            Product.objects.filter(pk=self.product_id).update(price=self.cost_template.sale_price)
+        if update_kwargs:
+            Product.objects.filter(pk=self.product_id).update(**update_kwargs)
 
 
 class ProductImage(models.Model):
