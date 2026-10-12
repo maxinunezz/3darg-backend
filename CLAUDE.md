@@ -288,6 +288,15 @@ Dirección opuesta a la de arriba: acá es `presupuestos3d` el que empuja datos 
 
 **`deploy/` (VPS + Caddy) quedó abandonado, nunca se usó en producción** — se preparó un stack alternativo (`docker-compose.prod.yml` con `db`+`web`+`caddy`, `backup-db.sh`/`backup-media.sh`/`reconcile-cron.sh` por cron) pero nunca se ejecutó: sin backups reales, sin DNS propio, dominio placeholder. Se decidió Railway en su lugar porque da Postgres gestionado + HTTPS automático + deploy por git push sin mantener VPS/Caddy/cron a mano. La carpeta se deja de referencia por si se reconsidera algún día, pero no reflejes este `deploy/` como el mecanismo real si te preguntan cómo se despliega.
 
+### Monitoreo de errores (Sentry)
+
+`config/settings.py` inicializa `sentry_sdk` (paquete `sentry-sdk[django]` en `requirements.txt`) al arrancar, **solo si `SENTRY_DSN` está cargado** en el `.env`/Railway — mismo criterio "vacío = apagado" que el resto de las integraciones (Meta, Google OAuth, BamBuddy, etc.). **Ya está activo en producción** (Railway tiene `SENTRY_DSN`/`SENTRY_TRACES_SAMPLE_RATE`/`SENTRY_PROFILE_SAMPLE_RATE` seteadas).
+
+- `send_default_pii=True` y `enable_logs=True`: Sentry recibe datos de request/usuario y los logs de Django, no solo excepciones no manejadas.
+- `environment` se resuelve solo (`"development"` si `DJANGO_DEBUG=1`, si no `"production"`) — no hace falta setearlo a mano.
+- `traces_sample_rate`/`profile_session_sample_rate` (tracing de performance) son configurables por env var, default `1.0` (100%) los dos — revisar si conviene bajarlos cuando haya volumen real de tráfico, hoy está así porque el proyecto es chico.
+- El **frontend (`ecommerce-frontend`) tiene su propia integración de Sentry, independiente de esta** (`sentry.server.config.ts`, `sentry.edge.config.ts`, `instrumentation-client.ts`, `app/global-error.tsx`, env vars `SENTRY_DSN`/`NEXT_PUBLIC_SENTRY_DSN` en Vercel) — dos proyectos de Sentry separados, uno por servicio, sin relación de código entre sí.
+
 ---
 
 ## Auth (JWT)
