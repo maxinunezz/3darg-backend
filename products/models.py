@@ -663,6 +663,43 @@ class Product(models.Model):
         fixed = getattr(self, f"{channel}_fixed_fee") + getattr(self, f"{channel}_shipping_cost")
         return (variable + fixed).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
+    def channel_expense_breakdown(self, channel: str) -> list[dict]:
+        """Desglose línea por línea de los gastos que suma
+        `channel_total_expenses()` — cada uno con su monto en $ y qué %
+        representa sobre el precio efectivo del canal (ver
+        `sale_price_for()`). Puramente informativo para el admin (ver
+        `ProductAdmin._channel_resumen()`): no se usa en ningún cálculo de
+        ganancia, `channel_total_expenses()` sigue siendo la única fuente de
+        verdad del total.
+        """
+        precio = self.sale_price_for(channel)
+        lineas = []
+        percent_fields = (
+            ("commission_percent", "Comisión"),
+            ("vat_percent", "IVA"),
+            ("gross_income_tax_percent", "Ingresos Brutos"),
+            ("other_variable_percent", "Otro costo variable (ej: cuotas)"),
+        )
+        for field, label in percent_fields:
+            pct = getattr(self, f"{channel}_{field}")
+            monto = (precio * pct / Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            lineas.append({"label": label, "percent": pct, "amount": monto})
+
+        fixed_fields = (
+            ("fixed_fee", "Cargo fijo"),
+            ("shipping_cost", "Costo de envío"),
+        )
+        for field, label in fixed_fields:
+            monto = getattr(self, f"{channel}_{field}")
+            pct = (
+                (monto / precio * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+                if precio
+                else None
+            )
+            lineas.append({"label": label, "percent": pct, "amount": monto})
+
+        return lineas
+
     def channel_net_profit(self, channel: str, cost: Decimal | None) -> Decimal | None:
         """Ganancia neta ($) vendiendo por `channel`: precio efectivo del
         canal (ver `sale_price_for()`) - cost - gastos del canal. `cost`

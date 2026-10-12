@@ -7,7 +7,7 @@ from django.core.exceptions import ValidationError
 from django.forms.models import BaseInlineFormSet, ModelChoiceIterator
 from django.shortcuts import render
 from django.urls import reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from .models import Product, Category, ProductImage, CostTemplate, ProductVariant
 from .services.presupuestos3d import get_cost
 from mercadolibre.services import sync_product, MLSyncError, MIN_ML_PICTURES
@@ -372,13 +372,41 @@ class ProductAdmin(admin.ModelAdmin):
         else:
             ganancia_str = "no se puede calcular (falta el costo de presupuestos3d)"
 
-        return format_html(
+        resumen = format_html(
             "<strong>Precio usado:</strong> {} &nbsp;|&nbsp; "
             "<strong>Costo (presupuestos3d):</strong> {} &nbsp;|&nbsp; "
             "<strong>Gastos de {}:</strong> ${} &nbsp;|&nbsp; "
             "<strong>Ganancia neta:</strong> {}",
             precio_str, costo_str, label, f"{gastos:.2f}", ganancia_str,
         )
+
+        # Desglose informativo gasto por gasto (no afecta ningún cálculo, solo
+        # ayuda a ver de un vistazo cuánto pesa cada concepto — ver
+        # Product.channel_expense_breakdown()).
+        filas = format_html_join(
+            "",
+            "<tr><td style='padding-right:16px'>{}</td>"
+            "<td style='padding-right:16px'>${}</td>"
+            "<td>{}</td></tr>",
+            (
+                (
+                    linea["label"],
+                    f"{linea['amount']:.2f}",
+                    f"{linea['percent']}% del precio" if linea["percent"] is not None else "—",
+                )
+                for linea in obj.channel_expense_breakdown(channel)
+            ),
+        )
+        desglose = format_html(
+            "<table style='margin-top:6px'><thead>"
+            "<tr><th style='text-align:left;padding-right:16px'>Gasto</th>"
+            "<th style='text-align:left;padding-right:16px'>Monto</th>"
+            "<th style='text-align:left'>% del precio</th></tr>"
+            "</thead><tbody>{}</tbody></table>",
+            filas,
+        )
+
+        return format_html("{}{}", resumen, desglose)
 
     @admin.display(description="Resumen Mercado Libre")
     def ml_resumen(self, obj):
