@@ -812,6 +812,19 @@ class CostTemplate(models.Model):
     length_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     width_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     height_cm = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    size_label = models.CharField(
+        "Tamaño (informativo)",
+        max_length=50,
+        blank=True,
+        help_text=(
+            "Tamaño informativo (ej: 'Mediano', 'Chico') que se propaga solo "
+            "al 'Tamaño' (`size`) de TODAS las variantes/productos vinculados "
+            "a este template — mismo criterio automático que precio y medidas "
+            "(ver `ProductVariant.save()`): se pisa en cada guardado de la "
+            "variante mientras este campo tenga algo cargado; vacío = no toca "
+            "el 'Tamaño' que ya tenga cargado el producto."
+        ),
+    )
     legacy_cutter_size = models.CharField(
         max_length=20,
         blank=True,
@@ -924,7 +937,11 @@ class ProductVariant(models.Model):
 
         Igual que `CosteoSyncAPIView`, cada campo del template se copia solo
         si está cargado (`is not None`) — un template con una medida vacía no
-        borra la medida que ya tenía la variante.
+        borra la medida que ya tenía la variante. `size_label` sigue el mismo
+        criterio pero con "vacío" de string (`if template.size_label:`), para
+        armar el "Tamaño" (`size`) de la variante/producto sin tener que
+        cargarlo a mano en cada diseño — ej: todo lo vinculado al template
+        "Mediano" queda con `size="Mediano"` solo.
 
         `CosteoSyncAPIView` y la acción de admin siguen actualizando estos
         campos con `.update()` a propósito (son operaciones en bloque sobre
@@ -943,6 +960,9 @@ class ProductVariant(models.Model):
                 if value is not None:
                     setattr(self, field, value)
                     update_kwargs[field] = value
+            if template.size_label:
+                self.size = template.size_label
+                update_kwargs["size"] = template.size_label
         super().save(*args, **kwargs)
         if update_kwargs:
             Product.objects.filter(pk=self.product_id).update(**update_kwargs)
