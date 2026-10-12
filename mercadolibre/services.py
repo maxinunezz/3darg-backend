@@ -356,6 +356,8 @@ def sync_product(product):
                 "de publicarlo por primera vez."
             )
         _request("PUT", f"/items/{product.ml_item_id}", json={"status": "paused"})
+        product.ml_last_synced_at = timezone.now()
+        product.save(update_fields=["ml_last_synced_at"])
         return product.ml_item_id, []
 
     payload = _build_payload(product)
@@ -382,11 +384,14 @@ def sync_product(product):
         update_payload["status"] = ML_ACTIVE_STATUS
         response_data = _request("PUT", f"/items/{product.ml_item_id}", json=update_payload)
         item_id = product.ml_item_id
+        product.ml_last_synced_at = timezone.now()
+        product.save(update_fields=["ml_last_synced_at"])
     else:
         response_data = _request("POST", "/items", json=payload)
         item_id = response_data["id"]
         product.ml_item_id = item_id
-        product.save(update_fields=["ml_item_id"])
+        product.ml_last_synced_at = timezone.now()
+        product.save(update_fields=["ml_item_id", "ml_last_synced_at"])
 
     _request(
         "PUT",

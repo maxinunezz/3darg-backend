@@ -8,7 +8,9 @@ from django.forms.models import BaseInlineFormSet, ModelChoiceIterator
 from django.shortcuts import render
 from django.urls import reverse
 from django.utils.html import format_html, format_html_join
-from .models import Product, Category, ProductImage, CostTemplate, ProductVariant
+from .models import (
+    Product, Category, ProductImage, CostTemplate, ProductVariant, ProductoEnMercadoLibre,
+)
 from .services.presupuestos3d import get_cost
 from mercadolibre.services import sync_product, MLSyncError, MIN_ML_PICTURES
 
@@ -337,7 +339,7 @@ class ProductAdmin(admin.ModelAdmin):
     ]
     search_fields = ["name", "description", "sku", "color", "size"]
     prepopulated_fields = {"slug": ("name",)}
-    readonly_fields = ["ml_item_id", "ml_resumen", "web_resumen", "variante_resumen"]
+    readonly_fields = ["ml_item_id", "ml_last_synced_at", "ml_resumen", "web_resumen", "variante_resumen"]
     inlines = [ProductImageWebInline, ProductImageMLInline]
     actions = ["publicar_en_mercadolibre", "regenerar_sku"]
 
@@ -499,7 +501,7 @@ class ProductAdmin(admin.ModelAdmin):
         ("Mercado Libre — todo lo que necesita este canal", {
             "fields": (
                 "is_available_ml",
-                "ml_item_id", "ml_category_id", "ml_price",
+                "ml_item_id", "ml_last_synced_at", "ml_category_id", "ml_price",
                 "color", "size", "shape", "is_dishwasher_safe",
                 "weight_kg", "length_cm", "width_cm", "height_cm",
                 "gtin", "warranty_months", "free_shipping_seller_paid",
@@ -526,7 +528,11 @@ class ProductAdmin(admin.ModelAdmin):
                 "(calculada sobre 'Precio Mercado Libre' si lo cargaste, si no sobre "
                 "el precio de la web). "
                 "ml_item_id se completa solo al "
-                "publicar por primera vez. 'is_available' (arriba) sigue siendo el "
+                "publicar por primera vez. 'Última sincronización con Mercado Libre' "
+                "es informativo (lo pisa el propio sync, no se edita a mano) — se "
+                "actualiza cada vez que la acción de abajo toca la publicación real "
+                "(alta, actualización o pausado/reactivado), no en cada guardado del "
+                "producto. 'is_available' (arriba) sigue siendo el "
                 "apagado general: si está apagado, no se vende en ningún lado sin "
                 "importar este canal. Después de cambiar cualquier campo de acá corré "
                 "la acción \"Publicar/Actualizar en Mercado Libre\" para que se "
@@ -606,3 +612,36 @@ class ProductAdmin(admin.ModelAdmin):
             self.message_user(request, f"{ok} producto(s) publicado(s)/actualizado(s) en Mercado Libre.")
         if fail:
             self.message_user(request, f"{fail} producto(s) con error, revisá los mensajes de arriba.", level="warning")
+
+
+@admin.register(ProductoEnMercadoLibre)
+class ProductoEnMercadoLibreAdmin(ProductAdmin):
+    """Misma ficha/acciones que `ProductAdmin` (hereda fieldsets, inlines,
+    acciones tal cual — no se duplica nada de eso), pero la lista solo
+    muestra los productos que YA tienen `ml_item_id` (se publicaron al menos
+    una vez), con ese id y la última sincronización bien a la vista en
+    primer plano — pensada para el uso diario de "entrar a lo que ya está
+    en ML, tocarlo y republicar", sin tener que buscarlo entre todo el
+    catálogo.
+
+    No se puede dar de alta un producto nuevo desde esta vista (todavía no
+    tendría `ml_item_id`, no pertenece a este recorte) — se crea como
+    siempre desde "Productos" y aparece acá solo una vez publicado.
+    """
+
+    ordering = ["-ml_last_synced_at"]
+    list_display = [
+        "name", "brand", "ml_item_id", "ml_last_synced_at",
+        "is_available_ml", "price", "ml_price", "stock",
+    ]
+    # `ProductAdmin.list_editable` trae campos que no están en el `list_display`
+    # de acá (ej: is_featured, members_only) — Django exige que todo
+    # list_editable esté en list_display, así que se recorta a lo que sí
+    # quedó mostrado en esta vista.
+    list_editable = ["is_available_ml"]
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).exclude(ml_item_id="")
+
+    def has_add_permission(self, request):
+        return False

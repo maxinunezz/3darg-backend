@@ -441,6 +441,18 @@ class Product(models.Model):
         ),
     )
 
+    ml_last_synced_at = models.DateTimeField(
+        "Última sincronización con Mercado Libre",
+        null=True,
+        blank=True,
+        editable=False,
+        help_text=(
+            "Última vez que `sync_product()` publicó/actualizó (o pausó/reactivó) "
+            "este ítem contra la API real de Mercado Libre. Puramente informativo "
+            "— lo pisa el propio sync, no se edita a mano."
+        ),
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -723,6 +735,22 @@ class Product(models.Model):
             return None
         ganancia = self.channel_net_profit(channel, cost)
         return (ganancia / precio * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+
+
+class ProductoEnMercadoLibre(Product):
+    """Proxy de `Product` (misma tabla, sin migración de datos) para tener una
+    vista de admin separada con solo los productos ya publicados en Mercado
+    Libre (`ml_item_id` cargado) — pensada para el día a día de "entrar a ver/
+    tocar lo que ya está en ML", sin tener que buscarlo entre los ~400
+    productos del catálogo completo. Ver `ProductoEnMercadoLibreAdmin`
+    (`products/admin.py`), que filtra el queryset y reusa TODO lo demás
+    (fieldsets, inlines, acciones) de `ProductAdmin` por herencia.
+    """
+
+    class Meta:
+        proxy = True
+        verbose_name = "Producto publicado en Mercado Libre"
+        verbose_name_plural = "Productos publicados en Mercado Libre"
 
 
 class CostTemplate(models.Model):
