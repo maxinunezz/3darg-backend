@@ -267,6 +267,15 @@ def _build_payload(product):
             "value_id": ML_DISHWASHER_SAFE_VALUE_IDS[product.is_dishwasher_safe],
             "value_name": "Sí" if product.is_dishwasher_safe else "No",
         })
+    # PACKS_NUMBER ("Cantidad de packs" en el panel de ML) es value_type="number", sin
+    # value_id para "No aplica" (confirmado en vivo: mandar texto libre "No aplica" tira
+    # item.attribute.invalid "is not a valid number"). Ningún producto nuestro se vende
+    # como "más de 1 pack idéntico" (eso es lo que mide este atributo puntual, distinto de
+    # "Sets" — un combo de piezas DISTINTAS, no packs duplicados), así que mandamos "1" fijo
+    # cuando la categoría admite el atributo: queda marcado como completo (deja de sumar al
+    # cartel naranja de "calidad de la publicación" en el panel de ML) sin inventar un dato.
+    if "PACKS_NUMBER" in category_attribute_ids:
+        payload["attributes"].append({"id": "PACKS_NUMBER", "value_name": "1"})
 
     # sale_terms es una clave aparte de "attributes" (confirmado en vivo contra
     # GET /categories/MLA375405/sale_terms) — WARRANTY_TIME necesita value_struct, no
