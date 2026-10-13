@@ -313,6 +313,27 @@ class CategoryAdmin(admin.ModelAdmin):
     search_fields = ["name", "slug", "sku_prefix"]
     prepopulated_fields = {"slug": ("name",)}
     autocomplete_fields = ["parent"]
+    fieldsets = (
+        (None, {
+            "fields": ("name", "slug", "brand", "parent", "sku_prefix"),
+        }),
+        ("Combo por categoría", {
+            "fields": ("bundle_discounts",),
+            "description": (
+                "Descuento por combo entre PRODUCTOS DISTINTOS de esta misma "
+                "subcategoría exacta (ej: Papá Noel + Muñeco de nieve, ambos "
+                "dentro de Cortantes > Navidad) — no se mezcla con "
+                "subcategorías hermanas ni con la categoría padre. Tramos, "
+                'ej: [{"quantity": 2, "discount_percent": 10}, '
+                '{"quantity": 3, "discount_percent": 15}]. La cantidad del '
+                "tramo es la suma de unidades entre todos los productos de "
+                "esta categoría en el carrito (repetir el mismo producto "
+                "también cuenta). Vacío = sin combo para esta subcategoría. "
+                "Se aplica automático en cart/checkout, sin acción del "
+                "usuario — disponible para cualquier marca."
+            ),
+        }),
+    )
 
 
 @admin.register(Product)

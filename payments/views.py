@@ -14,6 +14,7 @@ from django.shortcuts import get_object_or_404
 from brands.models import Brand
 from orders.models import Order, OrderItem
 from products.models import Product
+from products.services.combo_pricing import compute_unit_prices
 from .models import MercadoPagoPayment
 from .serializers import CheckoutProCreateSerializer
 from .services.mercadopago import create_preference, get_payment, is_valid_webhook_signature
@@ -46,7 +47,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         items_data = data["items"]
         product_ids = [it["product_id"] for it in items_data]
 
-        products_qs = Product.objects.filter(
+        products_qs = Product.objects.select_related("category").filter(
             id__in=product_ids,
             brand=brand,
             is_available=True,
@@ -82,13 +83,23 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Se resuelven TODOS los precios juntos en una sola pasada: el combo
+        # de categoría (productos distintos de la misma subcategoría, ver
+        # Category.bundle_discounts) depende de la cantidad sumada entre
+        # varias líneas del pedido, no se puede calcular línea por línea.
+        # Mismo mecanismo que usa el cart (`cart/serializers.py`), para que
+        # el precio cobrado en checkout sea exactamente el que se vio en el
+        # carrito.
+        unit_prices = compute_unit_prices(
+            user,
+            [(products_by_id[it["product_id"]], it["quantity"]) for it in items_data],
+        )
+
         items_for_mp = []
         total = Decimal("0")
-        for it in items_data:
+        for it, unit_price in zip(items_data, unit_prices):
             product = products_by_id[it["product_id"]]
             qty = it["quantity"]
-            # aplica descuento de socio y, si corresponde, descuento por volumen (bundle_discounts)
-            unit_price = product.unit_price_for(user, qty)
             items_for_mp.append({
                 "title": product.name,
                 "quantity": qty,
@@ -117,9 +128,9 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 product=products_by_id[it["product_id"]],
                 product_name=products_by_id[it["product_id"]].name,
                 quantity=it["quantity"],
-                unit_price=products_by_id[it["product_id"]].unit_price_for(user, it["quantity"]),
+                unit_price=unit_price,
             )
-            for it in items_data
+            for it, unit_price in zip(items_data, unit_prices)
         ]
         OrderItem.objects.bulk_create(order_items)
 

@@ -8,6 +8,25 @@ from django.utils.text import slugify
 from brands.models import Brand
 
 
+def _max_tier_discount(tiers, quantity: int) -> int:
+    """% de descuento del tramo de mayor cantidad que `quantity` todavía
+    cubre, dada una lista de tramos `[{"quantity": N, "discount_percent": P}, ...]`.
+
+    Helper compartido por `Product.bundle_discount_percent_for()` (mismo
+    producto) y `Category.bundle_discount_percent_for()` (combo entre
+    productos de la misma subcategoría) — misma semántica de tramos en los
+    dos casos, solo cambia qué cantidad se les pasa.
+    """
+    if not tiers:
+        return 0
+    applicable = [
+        int(tier.get("discount_percent", 0))
+        for tier in tiers
+        if quantity >= int(tier.get("quantity", 0))
+    ]
+    return max(applicable) if applicable else 0
+
+
 class ProductQuerySet(models.QuerySet):
     """Scoping de visibilidad por estado de autenticación."""
 
@@ -57,6 +76,24 @@ class Category(models.Model):
             "fallback."
         ),
     )
+    bundle_discounts = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Descuento por combo entre PRODUCTOS DISTINTOS de esta misma "
+            "subcategoría exacta (no suma con subcategorías hermanas ni con "
+            "la categoría padre). Lista de tramos, ej: "
+            '[{"quantity": 2, "discount_percent": 10}, {"quantity": 3, "discount_percent": 15}]. '
+            "La cantidad del tramo es la SUMA de unidades entre todos los "
+            "productos de esta categoría en el carrito (mezclados o "
+            "repetidos — comprar 5 unidades del mismo producto también "
+            "cuenta). Vacío = sin combo para esta subcategoría. Disponible "
+            "para cualquier marca, no es exclusivo de ninguna. Si el "
+            "producto además tiene su propio `bundle_discounts` (mismo "
+            "producto, ver Product), se aplica el MAYOR de los dos "
+            "porcentajes, no la suma."
+        ),
+    )
 
     class Meta:
         ordering = ["name"]
@@ -83,6 +120,12 @@ class Category(models.Model):
         if node.sku_prefix:
             return node.sku_prefix
         return slugify(node.slug).replace("-", "").upper()[:3] or "CAT"
+
+    def bundle_discount_percent_for(self, quantity: int) -> int:
+        """% de descuento por combo aplicable a `quantity` unidades combinadas
+        de productos de esta subcategoría exacta (ver help_text de
+        `bundle_discounts`)."""
+        return _max_tier_discount(self.bundle_discounts, quantity)
 
 
 class Product(models.Model):
@@ -600,14 +643,7 @@ class Product(models.Model):
         Toma el tramo de mayor cantidad que `quantity` todavía cubre (ej. tramos en
         2 y 3 unidades, comprando 5 se aplica el de 3). Sin `bundle_discounts` → 0.
         """
-        if not self.bundle_discounts:
-            return 0
-        applicable = [
-            int(tier.get("discount_percent", 0))
-            for tier in self.bundle_discounts
-            if quantity >= int(tier.get("quantity", 0))
-        ]
-        return max(applicable) if applicable else 0
+        return _max_tier_discount(self.bundle_discounts, quantity)
 
     def unit_price_for(self, user, quantity: int = 1) -> Decimal:
         """Precio unitario efectivo para `user` llevándose `quantity` unidades.
