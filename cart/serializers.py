@@ -86,3 +86,21 @@ class AddToCartSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, default=1)
     # Obligatorio: cada carrito pertenece a una única marca (ver cart/models.py).
     brand_slug = serializers.CharField()
+
+
+class CartQuoteItemSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1)
+
+
+class CartQuoteSerializer(serializers.Serializer):
+    # Cotiza precio con combo para el carrito de invitado (localStorage, sin
+    # `Cart` en el servidor) — ver CartQuoteAPIView. Mismo criterio de
+    # validación que ShippingCalculateSerializer (shipping/serializers.py).
+    brand_slug = serializers.CharField()
+    items = CartQuoteItemSerializer(many=True)
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("El carrito está vacío.")
+        return value

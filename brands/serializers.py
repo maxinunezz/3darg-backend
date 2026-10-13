@@ -35,6 +35,7 @@ class BrandSerializer(serializers.ModelSerializer):
             "theme",               # Colores y tipografía
             "social_links",        # Redes sociales
             "page_config",         # Personalización de landing (copy, secciones, features)
+            "shipping_config",     # Config de envío (ej. free_shipping_threshold) — sin secretos, se expone entera
             "meta_public_config",  # Subset seguro de meta_config (Pixel ID, Catalog ID) — sin tokens
             "links",                # Relación con BrandLink
             "children",              # Marcas hijas (MiniSlam, Print & Gym)

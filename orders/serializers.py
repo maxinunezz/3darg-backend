@@ -27,6 +27,7 @@ class OrderSerializer(serializers.ModelSerializer):
             "status_display",
             "currency",
             "total_amount",
+            "shipping_cost",
             "order_items",
             "external_reference",
             "customer_email",

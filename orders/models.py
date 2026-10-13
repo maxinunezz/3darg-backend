@@ -32,6 +32,15 @@ class Order(models.Model):
     currency = models.CharField(max_length=10, default="ARS")
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
+    # Costo de envío cobrado en este pedido — ya incluido en `total_amount`
+    # (se suma ahí y se manda como ítem aparte a MercadoPago, ver
+    # `payments/views.py`). 0 si hubo envío gratis (umbral de la marca,
+    # `Brand.shipping_config`) o si la integración de envío no corrió.
+    shipping_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # Código postal informado por el comprador al momento del checkout, solo
+    # a fines informativos (no se vuelve a cotizar con esto después).
+    shipping_postal_code = models.CharField(max_length=10, blank=True)
+
     items = models.JSONField(default=list, blank=True)
 
     external_reference = models.CharField(max_length=80, unique=True, blank=True)

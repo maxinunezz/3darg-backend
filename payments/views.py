@@ -15,6 +15,7 @@ from brands.models import Brand
 from orders.models import Order, OrderItem
 from products.models import Product
 from products.services.combo_pricing import compute_unit_prices
+from shipping.services.quote import cheapest_price, default_fallback_price, get_quotes
 from .models import MercadoPagoPayment
 from .serializers import CheckoutProCreateSerializer
 from .services.mercadopago import create_preference, get_payment, is_valid_webhook_signature
@@ -96,7 +97,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         )
 
         items_for_mp = []
-        total = Decimal("0")
+        subtotal = Decimal("0")
         for it, unit_price in zip(items_data, unit_prices):
             product = products_by_id[it["product_id"]]
             qty = it["quantity"]
@@ -105,7 +106,40 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 "quantity": qty,
                 "unit_price": float(unit_price),
             })
-            total += unit_price * qty
+            subtotal += unit_price * qty
+
+        # Costo de envío: se cobra siempre, salvo que la marca tenga un
+        # umbral de envío gratis (`Brand.shipping_config.free_shipping_threshold`)
+        # y el subtotal lo alcance. Mismo mecanismo de cotización
+        # (`shipping.services.quote`) que usa el preview del carrito
+        # (`/api/shipping/calculate/`), para que lo que se cobra acá sea
+        # consistente con lo que se mostró antes de pagar.
+        free_shipping_threshold = (brand.shipping_config or {}).get("free_shipping_threshold")
+        postal_code = (data.get("postal_code") or "").strip()
+        shipping_cost = Decimal("0")
+        if free_shipping_threshold and subtotal >= Decimal(str(free_shipping_threshold)):
+            shipping_cost = Decimal("0")
+        elif postal_code:
+            shipping_items = [(products_by_id[it["product_id"]], it["quantity"]) for it in items_data]
+            quote_result = get_quotes(
+                postal_code=postal_code,
+                province=(data.get("province") or "").strip() or None,
+                items=shipping_items,
+            )
+            shipping_cost = cheapest_price(quote_result["quotes"])
+        else:
+            # Sin código postal informado: se cobra la tarifa plana de
+            # respaldo en vez de dejar el envío en $0 por omisión.
+            shipping_cost = default_fallback_price()
+
+        if shipping_cost > 0:
+            items_for_mp.append({
+                "title": "Envío",
+                "quantity": 1,
+                "unit_price": float(shipping_cost),
+            })
+
+        total = subtotal + shipping_cost
 
         external_reference = uuid.uuid4().hex
 
@@ -115,6 +149,8 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             status=Order.Status.PENDING,
             currency=os.getenv("MP_CURRENCY", "ARS"),
             total_amount=total,
+            shipping_cost=shipping_cost,
+            shipping_postal_code=postal_code,
             external_reference=external_reference,
             customer_email=(
                 data.get("customer_email", "")
