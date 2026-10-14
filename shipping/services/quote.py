@@ -144,6 +144,56 @@ def cheapest_price(quotes: list[dict]) -> Decimal:
     return Decimal(str(min(q["price"] for q in quotes)))
 
 
+_METHOD_LABELS = {
+    ("correoargentino", "sucursal"): "Correo Argentino a sucursal",
+    ("andreani", "domicilio"): "Andreani a domicilio",
+}
+
+
+def select_methods(quotes: list[dict]) -> list[dict]:
+    """Recorta las cotizaciones normalizadas a los métodos que el checkout
+    deja elegir al comprador: Correo Argentino en modalidad "sucursal" y
+    Andreani en modalidad "domicilio" (la combinación que pidió el dueño,
+    ver CLAUDE.md del carrito). Si Envíopack no devolvió alguna de las dos
+    combinaciones para ese código postal, esa opción no aparece — el
+    frontend tiene que tolerar listas de 1.
+
+    Si `quotes` es el único fallback plano (sin Envíopack disponible),
+    se devuelve tal cual como única opción.
+    """
+    if len(quotes) == 1 and quotes[0].get("is_fallback"):
+        fallback = quotes[0]
+        return [{
+            "id": "fallback_domicilio",
+            "carrier": fallback["carrier"],
+            "modality": fallback["modality"],
+            "label": fallback["carrier"],
+            "price": fallback["price"],
+            "delivery_days": fallback["delivery_days"],
+            "is_fallback": True,
+        }]
+
+    methods = []
+    for (carrier_id, modality), label in _METHOD_LABELS.items():
+        candidates = [
+            q for q in quotes
+            if q["modality"] == modality and carrier_id in q["carrier"].lower().replace(" ", "")
+        ]
+        if not candidates:
+            continue
+        cheapest = min(candidates, key=lambda q: q["price"])
+        methods.append({
+            "id": f"{carrier_id}_{modality}",
+            "carrier": cheapest["carrier"],
+            "modality": modality,
+            "label": label,
+            "price": cheapest["price"],
+            "delivery_days": cheapest["delivery_days"],
+            "is_fallback": False,
+        })
+    return methods
+
+
 def default_fallback_price() -> Decimal:
     """Tarifa plana default (sin cotizar nada) — se usa en el checkout real
     cuando el comprador no mandó código postal: así el envío SIEMPRE se

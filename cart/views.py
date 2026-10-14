@@ -1,5 +1,4 @@
 import logging
-from decimal import Decimal
 
 from rest_framework import status
 from rest_framework.views import APIView
@@ -13,6 +12,7 @@ from products.services.combo_pricing import compute_unit_prices
 from brands.models import Brand
 from .models import Cart, CartItem
 from .serializers import CartSerializer, AddToCartSerializer, CartQuoteSerializer
+from .services.cart_discount import compute_cart_pricing
 
 logger = logging.getLogger(__name__)
 
@@ -124,11 +124,12 @@ class CartQuoteThrottle(AnonRateThrottle):
 
 
 class CartQuoteAPIView(APIView):
-    """Cotiza precio con combo de categoría para el carrito de invitado
-    (localStorage, sin `Cart` en el servidor) — mismo cálculo
-    (`compute_unit_prices`) que usan `CartSerializer` (carrito logueado) y
-    `MercadoPagoCheckoutProCreateAPIView` (checkout real), para que el
-    subtotal mostrado antes de loguearse/pagar no diverja del que se cobra.
+    """Cotiza precio con descuento por monto del carrito para el carrito de
+    invitado (localStorage, sin `Cart` en el servidor) — mismo cálculo
+    (`compute_unit_prices` + `compute_cart_pricing`) que usan `CartSerializer`
+    (carrito logueado) y `MercadoPagoCheckoutProCreateAPIView` (checkout
+    real), para que el subtotal/descuento mostrado antes de loguearse/pagar
+    no diverja de lo que se cobra.
     """
 
     permission_classes = [AllowAny]
@@ -162,18 +163,30 @@ class CartQuoteAPIView(APIView):
         ]
 
         user = request.user if request.user.is_authenticated else None
-        unit_prices = compute_unit_prices(user, valid_items)
+        list_prices = compute_unit_prices(user, valid_items)
+        lines = [
+            (price, quantity)
+            for (_product, quantity), price in zip(valid_items, list_prices)
+        ]
+        pricing = compute_cart_pricing(brand, lines)
 
-        items_response = []
-        total = Decimal("0")
-        for (product, quantity), unit_price in zip(valid_items, unit_prices):
-            subtotal = unit_price * quantity
-            items_response.append({
+        items_response = [
+            {
                 "product_id": product.id,
                 "quantity": quantity,
-                "unit_price": unit_price,
-                "subtotal": subtotal,
-            })
-            total += subtotal
+                "unit_price": discounted_unit_price,
+                "subtotal": discounted_unit_price * quantity,
+            }
+            for (product, quantity), discounted_unit_price in zip(
+                valid_items, pricing["discounted_unit_prices"]
+            )
+        ]
 
-        return Response({"items": items_response, "total": total})
+        return Response({
+            "items": items_response,
+            "subtotal": pricing["raw_subtotal"],
+            "discount_percent": pricing["discount_percent"],
+            "discount_amount": pricing["discount_amount"],
+            "total": pricing["total"],
+            "discount_progress": pricing["progress"],
+        })

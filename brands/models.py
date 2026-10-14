@@ -1,3 +1,4 @@
+from django.core.validators import MaxValueValidator
 from django.db import models
 from django.utils.text import slugify
 
@@ -111,6 +112,46 @@ class Brand(models.Model):
             "Configuración de envío por marca. Clave disponible: "
             "free_shipping_threshold (monto a partir del cual el envío es "
             "gratis; vacío o 0 = sin envío gratis)."
+        ),
+    )
+
+    # Descuento informativo por pagar por transferencia — se muestra como
+    # cartel en la ficha de producto (precio tachado + "X% OFF por
+    # transferencia"), en el mismo lugar donde antes vivía el selector
+    # "Llevá 1/2/3". Es puramente de DISPLAY: el cobro real sigue yendo
+    # 100% por MercadoPago Checkout Pro al precio de lista, la diferencia
+    # se concilia por fuera del sistema. 0 = no se muestra el cartel.
+    transfer_discount_percent = models.PositiveSmallIntegerField(
+        "Descuento por transferencia (%)",
+        default=0,
+        validators=[MaxValueValidator(100)],
+        help_text=(
+            "Descuento informativo que se muestra en la ficha de producto "
+            "por pagar por transferencia (cartel con precio tachado). No "
+            "afecta el cobro real del checkout, que sigue yendo 100% por "
+            "MercadoPago al precio de lista. 0 = no se muestra el cartel."
+        ),
+    )
+
+    # Descuento por MONTO TOTAL del carrito (no por categoría ni cantidad de
+    # artículos — reemplaza al viejo combo de Category.bundle_discounts,
+    # ver products/models.py). Lista de tramos, ej:
+    # [{"min_amount": 50000, "discount_percent": 5}, {"min_amount": 100000, "discount_percent": 10}].
+    # Se resuelve contra el SUBTOTAL del carrito (antes de envío), tomando
+    # el tramo de mayor monto que el subtotal alcance. Vacío = sin
+    # descuento por monto. Cada carrito es aislado por (usuario, marca)
+    # — ver cart.Cart —, así que este descuento nunca cruza entre marcas.
+    cart_discount_config = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Tramos de descuento por monto TOTAL del carrito (no por "
+            "categoría ni cantidad de artículos). Lista de tramos, ej: "
+            '[{"min_amount": 50000, "discount_percent": 5}, '
+            '{"min_amount": 100000, "discount_percent": 10}]. '
+            "Se aplica sobre el subtotal del carrito (antes del envío), "
+            "tomando el tramo de mayor monto alcanzado. Vacío = sin "
+            "descuento por monto."
         ),
     )
 

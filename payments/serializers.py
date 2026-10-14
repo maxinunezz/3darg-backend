@@ -17,6 +17,11 @@ class CheckoutProCreateSerializer(serializers.Serializer):
     # envío gratis — ver `MercadoPagoCheckoutProCreateAPIView`.
     postal_code = serializers.CharField(required=False, allow_blank=True, max_length=10)
     province = serializers.CharField(required=False, allow_blank=True, max_length=2)
+    # Id del método elegido en el selector del carrito (ver
+    # `shipping/services/quote.py::select_methods()`, ej. "andreani_domicilio").
+    # Si no viene o no matchea ninguna cotización vigente, se cae al más
+    # barato (`cheapest_price()`), igual que antes de este selector.
+    shipping_method_id = serializers.CharField(required=False, allow_blank=True, max_length=40)
 
     def validate_items(self, value):
         if not value:

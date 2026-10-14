@@ -40,6 +40,11 @@ class Order(models.Model):
     # Código postal informado por el comprador al momento del checkout, solo
     # a fines informativos (no se vuelve a cotizar con esto después).
     shipping_postal_code = models.CharField(max_length=10, blank=True)
+    # Método de envío elegido por el comprador en el selector del carrito
+    # (ver `shipping/services/quote.py::select_methods()`). Vacío si se cayó
+    # al fallback de "más barato" (sin selección explícita o CP no cotizado).
+    shipping_method = models.CharField(max_length=30, blank=True)  # "andreani" | "correoargentino" | ""
+    shipping_modality = models.CharField(max_length=20, blank=True)  # "domicilio" | "sucursal" | ""
 
     items = models.JSONField(default=list, blank=True)
 

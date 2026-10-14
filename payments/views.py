@@ -15,7 +15,8 @@ from brands.models import Brand
 from orders.models import Order, OrderItem
 from products.models import Product
 from products.services.combo_pricing import compute_unit_prices
-from shipping.services.quote import cheapest_price, default_fallback_price, get_quotes
+from cart.services.cart_discount import compute_cart_pricing
+from shipping.services.quote import cheapest_price, default_fallback_price, get_quotes, select_methods
 from .models import MercadoPagoPayment
 from .serializers import CheckoutProCreateSerializer
 from .services.mercadopago import create_preference, get_payment, is_valid_webhook_signature
@@ -84,20 +85,24 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Se resuelven TODOS los precios juntos en una sola pasada: el combo
-        # de categoría (productos distintos de la misma subcategoría, ver
-        # Category.bundle_discounts) depende de la cantidad sumada entre
-        # varias líneas del pedido, no se puede calcular línea por línea.
-        # Mismo mecanismo que usa el cart (`cart/serializers.py`), para que
-        # el precio cobrado en checkout sea exactamente el que se vio en el
-        # carrito.
-        unit_prices = compute_unit_prices(
+        # Se resuelven TODOS los precios juntos en una sola pasada: el
+        # descuento por MONTO TOTAL del carrito (`Brand.cart_discount_config`,
+        # ver `cart/services/cart_discount.py`) depende del subtotal de TODO
+        # el pedido, no se puede calcular línea por línea. Mismo mecanismo
+        # que usa el cart (`cart/serializers.py`/`CartQuoteAPIView`), para
+        # que el precio cobrado en checkout sea exactamente el que se vio en
+        # el carrito.
+        list_prices = compute_unit_prices(
             user,
             [(products_by_id[it["product_id"]], it["quantity"]) for it in items_data],
         )
+        lines = [
+            (price, it["quantity"]) for it, price in zip(items_data, list_prices)
+        ]
+        pricing = compute_cart_pricing(brand, lines)
+        unit_prices = pricing["discounted_unit_prices"]
 
         items_for_mp = []
-        subtotal = Decimal("0")
         for it, unit_price in zip(items_data, unit_prices):
             product = products_by_id[it["product_id"]]
             qty = it["quantity"]
@@ -106,7 +111,10 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 "quantity": qty,
                 "unit_price": float(unit_price),
             })
-            subtotal += unit_price * qty
+        # `subtotal` ya incluye el descuento por monto aplicado — el umbral
+        # de envío gratis se evalúa contra lo que el cliente efectivamente
+        # paga, no contra el monto de lista.
+        subtotal = pricing["total"]
 
         # Costo de envío: se cobra siempre, salvo que la marca tenga un
         # umbral de envío gratis (`Brand.shipping_config.free_shipping_threshold`)
@@ -116,7 +124,10 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         # consistente con lo que se mostró antes de pagar.
         free_shipping_threshold = (brand.shipping_config or {}).get("free_shipping_threshold")
         postal_code = (data.get("postal_code") or "").strip()
+        shipping_method_id = (data.get("shipping_method_id") or "").strip()
         shipping_cost = Decimal("0")
+        shipping_method = ""
+        shipping_modality = ""
         if free_shipping_threshold and subtotal >= Decimal(str(free_shipping_threshold)):
             shipping_cost = Decimal("0")
         elif postal_code:
@@ -126,7 +137,20 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 province=(data.get("province") or "").strip() or None,
                 items=shipping_items,
             )
-            shipping_cost = cheapest_price(quote_result["quotes"])
+            # Si el comprador eligió un método en el selector del carrito (ver
+            # `select_methods()`) y sigue vigente para este CP, se cobra ESE
+            # precio y se guarda qué eligió. Si no vino `shipping_method_id`
+            # o ya no matchea ninguna cotización (ej. cambió el CP entre que
+            # cotizó y pagó), se cae al más barato — mismo comportamiento que
+            # antes de este selector.
+            methods = select_methods(quote_result["quotes"])
+            selected = next((m for m in methods if m["id"] == shipping_method_id), None)
+            if selected:
+                shipping_cost = Decimal(str(selected["price"]))
+                if not selected.get("is_fallback"):
+                    shipping_method, _, shipping_modality = selected["id"].partition("_")
+            else:
+                shipping_cost = cheapest_price(quote_result["quotes"])
         else:
             # Sin código postal informado: se cobra la tarifa plana de
             # respaldo en vez de dejar el envío en $0 por omisión.
@@ -151,6 +175,8 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             total_amount=total,
             shipping_cost=shipping_cost,
             shipping_postal_code=postal_code,
+            shipping_method=shipping_method,
+            shipping_modality=shipping_modality,
             external_reference=external_reference,
             customer_email=(
                 data.get("customer_email", "")

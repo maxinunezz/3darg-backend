@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from products.models import Product
 
 from .serializers import ShippingCalculateSerializer
-from .services.quote import get_quotes
+from .services.quote import get_quotes, select_methods
 
 
 class ShippingQuoteThrottle(AnonRateThrottle):
@@ -42,4 +42,5 @@ class ShippingCalculateAPIView(APIView):
 
         items = [(products[entry["product_id"]], entry["quantity"]) for entry in items_data]
         result = get_quotes(postal_code=postal_code, province=province, items=items)
+        result["methods"] = select_methods(result["quotes"])
         return Response(result)
