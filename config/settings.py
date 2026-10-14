@@ -102,6 +102,7 @@ INSTALLED_APPS = [
     'cart',
     'contact',
     'vending',
+    'wholesale',
     'mercadolibre',
     'shipping',
 ]

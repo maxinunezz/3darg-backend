@@ -30,6 +30,9 @@ urlpatterns = [
     # Máquina expendedora — landing de validación de mercado
     path("api/vending/", include("vending.urls")),
 
+    # Mayoristas — alta de cuenta mayorista (hoy solo linkeado desde Lumy)
+    path("api/wholesale/", include("wholesale.urls")),
+
     # Mercado Libre — handshake OAuth (alta/renovación de credenciales)
     path("api/mercadolibre/", include("mercadolibre.urls")),
 
