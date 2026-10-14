@@ -208,17 +208,14 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
 
 # --- Email ---
-# Proveedor elegido: Resend (SMTP relay). Apagado hasta tener dominio verificado:
-# EMAIL_BACKEND sigue en "console" (no manda mails reales) hasta que se cree la
-# cuenta Resend, se verifique el dominio de Lumy y se cargue EMAIL_HOST_PASSWORD
-# con la API key real. Ver 3darg-backend/CLAUDE.md para el detalle de activación.
+# Proveedor: Resend, vía su API HTTP (`config/email_backends.py`), no SMTP —
+# Railway bloquea el tráfico saliente por los puertos SMTP (confirmado con un
+# timeout real al conectar), así que el backend de Django manda cada mail con
+# un POST a la API de Resend sobre 443 en vez de abrir una conexión SMTP.
+# EMAIL_HOST_PASSWORD = API key de Resend. Dominio verificado: 3darg.com.
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
-EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.resend.com")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "resend")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "Lumy <noreply@lumy.com>")
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "Lumy <noreply@3darg.com>")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "3darg1@gmail.com")
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "https://t.me/3darg")
 
