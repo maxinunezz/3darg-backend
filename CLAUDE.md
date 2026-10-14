@@ -56,6 +56,9 @@ GOOGLE_OAUTH_CLIENT_ID=...      # Client ID de Google Cloud Console (login "Cont
 ML_CLIENT_ID=...  ML_CLIENT_SECRET=...  ML_REDIRECT_URI=...  ML_SITE_ID=MLA   # Mercado Libre, ver sección dedicada
 BAMBUDDY_URL=...  BAMBUDDY_API_KEY=...  BAMBUDDY_PRINTER_ID=1   # cola de impresión automática, vacío = apagado
 PRESUPUESTOS3D_API_URL=...  PRESUPUESTOS3D_API_TOKEN=...        # aviso de venta online, vacío = apagado (ver sección dedicada)
+
+ENVIOPACK_API_KEY=...  ENVIOPACK_SECRET_KEY=...   # cotización real de envío (Correo Argentino/Andreani), vacío = fallback de tarifa plana (ver sección dedicada "Envíos — selector Correo Argentino/Andreani")
+SHIPPING_FALLBACK_RATES_JSON={"default": 6500, "zones": {}}   # tarifa de respaldo cuando Envíopack no está configurado/falla
 ```
 
 El mismo `.env` es leído por los servicios `db` y `web` en `docker-compose.yml`.
@@ -274,6 +277,25 @@ Dirección opuesta a la de arriba: acá es `presupuestos3d` el que empuja datos 
 - **Auth**: `TokenAuthentication` + `IsAdminUser`, con el token del usuario staff dedicado `integracion_presupuestos3d` (mismo patrón que la integración de arriba, pero en sentido inverso — token generado acá, usado por `presupuestos3d`). Requiere `rest_framework.authtoken` en `INSTALLED_APPS` (agregado específicamente para esto; el resto del backend usa `JWTAuthentication`).
 - Del lado de `presupuestos3d`: vacío `API_3DARG_URL`/`API_3DARG_TOKEN` = integración apagada, nunca rompe el guardado del `Producto` (mismo criterio "vacío = apagado" de siempre). Ver `presupuestos3d/CLAUDE.md` para el detalle del lado emisor (campos del modelo, feedback en el admin).
 - **Trazabilidad del mecanismo viejo**: antes de esta fase, `CosteoSyncAPIView` recibía `cutter_size` (`Product.CutterSize`) y hacía `Product.objects.filter(cutter_size=...).update(...)` en bloque — agrupaba por un enum fijo de 5 tamaños en vez de por template libre. La migración `0034_crear_productvariant_y_costtemplate` creó un `CostTemplate` por cada `cutter_size` en uso (`legacy_cutter_size`) para no perder esa agrupación histórica al migrar.
+
+---
+
+## Envíos — selector Correo Argentino/Andreani (código listo, en espera de alta en Envíopack)
+
+El carrito ya deja elegir entre **"Correo Argentino a sucursal"** y **"Andreani a domicilio"**, cobrando en el checkout el precio real del método que elija el comprador (antes siempre se cobraba el más barato sin mostrar opciones). Toda la implementación está terminada y verificada — lo único que falta para que muestre tarifas reales es completar el alta de una cuenta en Envíopack (agregador que cotiza contra los couriers reales).
+
+- **Código implicado** (todo ya escrito, sin pendientes de código): `shipping/services/quote.py` (`get_quotes()`, `select_methods()`, `cheapest_price()`, `default_fallback_price()`), `shipping/services/enviopack.py` (cliente HTTP), `shipping/services/postal.py` (`resolve_provincia_ar()`), `shipping/views.py`, `payments/serializers.py`/`payments/views.py` (`shipping_method_id`), `orders/models.py` (`shipping_method`/`shipping_modality`) + migración `orders/migrations/0006_shipping_method_modality.py`, `orders/admin.py`. Frontend: `ecommerce-frontend/components/shipping-estimator.tsx` (selector completo, radios + "Cambiar CP" + "Ver direcciones") y el `shipping_method_id` ya se manda desde `cart-page-content.tsx`/`site/cart-content.tsx`.
+- **Bloqueado en**: `ENVIOPACK_API_KEY`/`ENVIOPACK_SECRET_KEY` están vacíos en todos los entornos (dev y Railway) — nadie creó todavía la cuenta de Envíopack. Sin esas credenciales, `enviopack.get_quotes()` devuelve `None` siempre (log: *"Envíopack no configurado, se usa la tarifa de respaldo"*) y el carrito cae a una única tarifa plana (`SHIPPING_FALLBACK_RATES_JSON`) — **es el comportamiento esperado, no un bug**: nunca van a aparecer las dos opciones reales hasta cargar las credenciales.
+- **Trámite en curso (2026-10-14)**: Envíopack no tiene alta de cuenta 100% self-service para integraciones de API custom (no Tiendanube/Mercado Libre) — piden pasar por `https://www.enviopack.com.ar/contacto` para que el equipo comercial dé de alta y entregue `api-key`/`secret-key`. El dueño va a escribir ahí; está pendiente la respuesta de ellos.
+
+### Para retomar cuando lleguen las credenciales
+
+1. Cargar `ENVIOPACK_API_KEY`/`ENVIOPACK_SECRET_KEY` en `3darg-backend/.env` (dev) y en las variables del servicio `web` en Railway (prod).
+2. `docker compose restart web` (dev) / redeploy en Railway (prod).
+3. Probar `POST /api/shipping/calculate/` con un código postal de CABA (`1000`–`1499`, el único rango que hoy resuelve `resolve_provincia_ar()` en `shipping/services/postal.py`) y confirmar que la respuesta trae `methods` con 2 entradas (`andreani_domicilio` + `correoargentino_sucursal`) en vez de una sola `fallback_domicilio`.
+4. **Si hace falta cotizar fuera de CABA**: `resolve_provincia_ar()` solo resuelve ese rango a propósito (evita adivinar mal la provincia y cotizar con datos incorrectos, ver comentario en el archivo). Para ampliar cobertura: sumar rangos verificados a `_KNOWN_RANGES`, o — mejor a mediano plazo — pedirle la provincia directo al comprador en el checkout (`ShippingCalculateSerializer` ya acepta `province` opcional para este caso).
+5. Verificar en el navegador (`/lumy/cart` con productos en el carrito) que aparecen los dos radios con precio real y que el total se actualiza al elegir uno.
+6. Completar un checkout de prueba (sandbox MercadoPago) y confirmar en el admin que el `Order` creado tiene `shipping_method`/`shipping_modality` guardados según lo elegido.
 
 ---
 
