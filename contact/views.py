@@ -32,17 +32,21 @@ class ContactThrottle(AnonRateThrottle):
 
 
 class ContactSerializer(serializers.Serializer):
-    name = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    name = serializers.CharField(max_length=120)
     email = serializers.EmailField()
-    title = serializers.CharField(max_length=150)
+    phone = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    title = serializers.CharField(max_length=150, required=False, allow_blank=True)
     body = serializers.CharField(max_length=2000)
     # Slug de la marca desde la que se manda la consulta (ej: "lumy"). Opcional:
     # si no se manda, se asume 3DARG (comportamiento previo, sin romper nada).
     brand = serializers.SlugField(max_length=140, required=False, allow_blank=True)
 
 
-def _build_internal_html(email: str, title: str, body: str, name: str, brand_name: str) -> str:
+def _build_internal_html(email: str, title: str, body: str, name: str, brand_name: str, phone: str = "") -> str:
     from_line = f"{name} &lt;{email}&gt;" if name else email
+    phone_block = (
+        f'<div class="label">Teléfono</div><div class="value">{phone}</div>' if phone else ""
+    )
     return f"""
 <!DOCTYPE html>
 <html lang="es">
@@ -62,6 +66,7 @@ def _build_internal_html(email: str, title: str, body: str, name: str, brand_nam
     <h1>Nueva consulta — {brand_name}</h1>
     <div class="label">De</div>
     <div class="value">{from_line}</div>
+    {phone_block}
     <div class="label">Asunto</div>
     <div class="value">{title}</div>
     <div class="label">Mensaje</div>
@@ -119,9 +124,10 @@ class ContactAPIView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        name = serializer.validated_data.get("name", "")
+        name = serializer.validated_data["name"]
         email = serializer.validated_data["email"]
-        title = serializer.validated_data["title"]
+        phone = serializer.validated_data.get("phone", "")
+        title = serializer.validated_data.get("title", "") or "Consulta general"
         body = serializer.validated_data["body"]
         brand_slug = serializer.validated_data.get("brand", "")
 
@@ -135,20 +141,25 @@ class ContactAPIView(APIView):
 
         to_email = _resolve_contact_email(brand_slug)
 
+        phone_line = f"Teléfono: {phone}\n" if phone else ""
+
         try:
             # Email interno (a la marca correspondiente, o a CONTACT_EMAIL si no hay override)
             internal = EmailMultiAlternatives(
                 subject=f"[Consulta {brand_name}] {title}",
                 body=(
                     f"Marca: {brand_name}\n"
-                    f"De: {name + ' ' if name else ''}<{email}>\n\n"
-                    f"Asunto: {title}\n\n{body}"
+                    f"De: {name + ' ' if name else ''}<{email}>\n"
+                    f"{phone_line}"
+                    f"\nAsunto: {title}\n\n{body}"
                 ),
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 to=[to_email],
                 reply_to=[email],
             )
-            internal.attach_alternative(_build_internal_html(email, title, body, name, brand_name), "text/html")
+            internal.attach_alternative(
+                _build_internal_html(email, title, body, name, brand_name, phone), "text/html"
+            )
             internal.send()
 
             # Email de confirmación al cliente
