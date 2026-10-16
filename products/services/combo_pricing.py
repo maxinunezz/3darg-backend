@@ -4,8 +4,9 @@ Históricamente este módulo combinaba el descuento por volumen del propio
 producto (`Product.bundle_discounts`) con el combo por categoría
 (`Category.bundle_discounts`, entre productos DISTINTOS de una misma
 subcategoría). Ambos mecanismos quedaron reemplazados por el descuento por
-MONTO TOTAL del carrito (`Brand.cart_discount_config`, ver
-`cart/services/cart_discount.py`), que es el único que hoy incentiva
+CANTIDAD TOTAL de unidades del carrito (`Brand.cart_discount_config`, ver
+`cart/services/cart_discount.py` — a su vez reemplazo de un primer mecanismo
+por MONTO total que tuvo este campo antes), que es el único que hoy incentiva
 comprar más desde el carrito (antes se elegía desde la ficha de producto).
 
 `compute_unit_prices()` ahora solo resuelve `price_for(user)` por línea

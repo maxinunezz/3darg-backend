@@ -133,25 +133,31 @@ class Brand(models.Model):
         ),
     )
 
-    # Descuento por MONTO TOTAL del carrito (no por categoría ni cantidad de
-    # artículos — reemplaza al viejo combo de Category.bundle_discounts,
-    # ver products/models.py). Lista de tramos, ej:
-    # [{"min_amount": 50000, "discount_percent": 5}, {"min_amount": 100000, "discount_percent": 10}].
-    # Se resuelve contra el SUBTOTAL del carrito (antes de envío), tomando
-    # el tramo de mayor monto que el subtotal alcance. Vacío = sin
-    # descuento por monto. Cada carrito es aislado por (usuario, marca)
+    # Descuento por CANTIDAD TOTAL de unidades del carrito (sumando todas
+    # las líneas, sin importar el producto — no por categoría ni por monto
+    # en $; reemplaza al mecanismo anterior por monto total y al viejo
+    # combo de Category.bundle_discounts, ver products/models.py). Lista
+    # de tramos, ej:
+    # [{"min_quantity": 5, "discount_percent": 5}, {"min_quantity": 10, "discount_percent": 10}].
+    # Se resuelve contra la CANTIDAD de unidades del carrito (no el
+    # subtotal), tomando el tramo de mayor cantidad que el carrito alcance
+    # — el % sigue aplicándose sobre el monto (es un descuento en $, solo
+    # que lo dispara la cantidad de unidades, no cuánto suman en pesos).
+    # Vacío = sin descuento. Cada carrito es aislado por (usuario, marca)
     # — ver cart.Cart —, así que este descuento nunca cruza entre marcas.
     cart_discount_config = models.JSONField(
         default=list,
         blank=True,
         help_text=(
-            "Tramos de descuento por monto TOTAL del carrito (no por "
-            "categoría ni cantidad de artículos). Lista de tramos, ej: "
-            '[{"min_amount": 50000, "discount_percent": 5}, '
-            '{"min_amount": 100000, "discount_percent": 10}]. '
-            "Se aplica sobre el subtotal del carrito (antes del envío), "
-            "tomando el tramo de mayor monto alcanzado. Vacío = sin "
-            "descuento por monto."
+            "Tramos de descuento por CANTIDAD TOTAL de unidades del "
+            "carrito (sumando todos los productos, no por categoría ni "
+            "por monto en $). Lista de tramos, ej: "
+            '[{"min_quantity": 5, "discount_percent": 5}, '
+            '{"min_quantity": 10, "discount_percent": 10}]. '
+            "Se aplica sobre el total del carrito (el % sigue siendo un "
+            "descuento en $, pero lo dispara la cantidad de unidades, no "
+            "el monto), tomando el tramo de mayor cantidad alcanzada. "
+            "Vacío = sin descuento."
         ),
     )
 

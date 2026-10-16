@@ -124,7 +124,7 @@ class CartQuoteThrottle(AnonRateThrottle):
 
 
 class CartQuoteAPIView(APIView):
-    """Cotiza precio con descuento por monto del carrito para el carrito de
+    """Cotiza precio con descuento por cantidad del carrito para el carrito de
     invitado (localStorage, sin `Cart` en el servidor) — mismo cálculo
     (`compute_unit_prices` + `compute_cart_pricing`) que usan `CartSerializer`
     (carrito logueado) y `MercadoPagoCheckoutProCreateAPIView` (checkout

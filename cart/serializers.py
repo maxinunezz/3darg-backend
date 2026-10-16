@@ -10,9 +10,10 @@ from .services.cart_discount import compute_cart_pricing
 class CartItemSerializer(serializers.ModelSerializer):
     product = ProductSerializer(read_only=True)
     # Precio unitario y subtotal con descuento de socio + descuento por
-    # monto total del carrito ya aplicados (mismo % en todas las líneas,
-    # ver `Brand.cart_discount_config`). Depende del subtotal de TODO el
-    # carrito, así que no se puede resolver línea por línea acá —
+    # cantidad total de unidades del carrito ya aplicados (mismo % en
+    # todas las líneas, ver `Brand.cart_discount_config`). Depende de la
+    # cantidad de TODO el carrito, así que no se puede resolver línea por
+    # línea acá —
     # `CartSerializer.to_representation()` lo calcula una sola vez
     # (`compute_cart_pricing`) y lo cachea en el contexto compartido,
     # keyed por `CartItem.id`.
@@ -29,7 +30,7 @@ class CartItemSerializer(serializers.ModelSerializer):
             return cache[obj.id]
         # Fallback defensivo (no debería pasar si se serializa vía
         # CartSerializer, que siempre precalcula el cache): precio de
-        # lista/socio sin el descuento por monto del carrito.
+        # lista/socio sin el descuento por cantidad del carrito.
         request = self.context.get("request")
         user = getattr(request, "user", None)
         return obj.product.price_for(user)

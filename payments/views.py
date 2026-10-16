@@ -86,9 +86,10 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             )
 
         # Se resuelven TODOS los precios juntos en una sola pasada: el
-        # descuento por MONTO TOTAL del carrito (`Brand.cart_discount_config`,
-        # ver `cart/services/cart_discount.py`) depende del subtotal de TODO
-        # el pedido, no se puede calcular línea por línea. Mismo mecanismo
+        # descuento por CANTIDAD TOTAL de unidades del carrito
+        # (`Brand.cart_discount_config`, ver `cart/services/cart_discount.py`)
+        # depende de la cantidad de TODO el pedido, no se puede calcular
+        # línea por línea. Mismo mecanismo
         # que usa el cart (`cart/serializers.py`/`CartQuoteAPIView`), para
         # que el precio cobrado en checkout sea exactamente el que se vio en
         # el carrito.
