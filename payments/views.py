@@ -16,7 +16,7 @@ from orders.models import Order, OrderItem
 from products.models import Product
 from products.services.combo_pricing import compute_unit_prices
 from cart.services.cart_discount import compute_cart_pricing
-from shipping.services.quote import cheapest_price, default_fallback_price, get_quotes, select_methods
+from shipping.services.quote import cheapest_price, get_quotes, select_methods
 from .models import MercadoPagoPayment
 from .serializers import CheckoutProCreateSerializer
 from .services.mercadopago import create_preference, get_payment, is_valid_webhook_signature
@@ -124,37 +124,90 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         # consistente con lo que se mostró antes de pagar.
         free_shipping_threshold = (brand.shipping_config or {}).get("free_shipping_threshold")
         postal_code = (data.get("postal_code") or "").strip()
+        province = (data.get("province") or "").strip()
         shipping_method_id = (data.get("shipping_method_id") or "").strip()
         shipping_cost = Decimal("0")
         shipping_method = ""
         shipping_modality = ""
         if free_shipping_threshold and subtotal >= Decimal(str(free_shipping_threshold)):
             shipping_cost = Decimal("0")
-        elif postal_code:
+            # Aunque el envío salga gratis, igual hace falta saber qué
+            # modalidad eligió el comprador (sucursal vs domicilio) para
+            # validar la dirección correspondiente más abajo y para el alta
+            # real en Correo Argentino (`deliveryType`).
+            if shipping_method_id:
+                shipping_method, _, shipping_modality = shipping_method_id.partition("_")
+        else:
+            # `get_quotes()` intenta cotización EN VIVO contra la API real de
+            # Correo Argentino (`POST /rates`) cuando se conoce `postal_code`
+            # de destino y hay credenciales cargadas; si no (sin CP, sin
+            # credenciales, o falla la consulta), cae a la tabla estática por
+            # peso/Valor Declarado (ver `quote.py`) — nunca deja un método sin
+            # cotizar. Se calcula siempre, se haya mandado CP o no. Si el
+            # comprador eligió un método en el selector del carrito
+            # (`select_methods()`) se cobra ESE precio y se guarda qué
+            # eligió; si no vino `shipping_method_id` o no matchea ningún
+            # método, se cae al más barato (mismo comportamiento que antes de
+            # este selector).
             shipping_items = [(products_by_id[it["product_id"]], it["quantity"]) for it in items_data]
             quote_result = get_quotes(
                 postal_code=postal_code,
-                province=(data.get("province") or "").strip() or None,
                 items=shipping_items,
+                declared_value=subtotal,
             )
-            # Si el comprador eligió un método en el selector del carrito (ver
-            # `select_methods()`) y sigue vigente para este CP, se cobra ESE
-            # precio y se guarda qué eligió. Si no vino `shipping_method_id`
-            # o ya no matchea ninguna cotización (ej. cambió el CP entre que
-            # cotizó y pagó), se cae al más barato — mismo comportamiento que
-            # antes de este selector.
             methods = select_methods(quote_result["quotes"])
             selected = next((m for m in methods if m["id"] == shipping_method_id), None)
             if selected:
                 shipping_cost = Decimal(str(selected["price"]))
-                if not selected.get("is_fallback"):
-                    shipping_method, _, shipping_modality = selected["id"].partition("_")
+                shipping_method, _, shipping_modality = selected["id"].partition("_")
             else:
                 shipping_cost = cheapest_price(quote_result["quotes"])
-        else:
-            # Sin código postal informado: se cobra la tarifa plana de
-            # respaldo en vez de dejar el envío en $0 por omisión.
-            shipping_cost = default_fallback_price()
+
+        # Dirección del comprador — la API real de Correo Argentino (API
+        # MiCorreo) NO exige la misma cosa para las dos modalidades: en
+        # sucursal solo pide `agency` (código de la sucursal elegida, ver
+        # `correo_argentino.py::_build_shipment_payload()`), la dirección
+        # completa NO es obligatoria (`shipping.address` solo se exige si
+        # `deliveryType != "S"`); en domicilio sí hace falta la dirección
+        # completa del comprador. Si el método elegido no matcheó nada
+        # (fallback por CP ausente), no se exige nada nuevo — se mantiene el
+        # comportamiento histórico de checkout mínimo.
+        address_fields = {
+            "shipping_full_name": (data.get("full_name") or "").strip(),
+            "shipping_phone": (data.get("phone") or "").strip(),
+            "shipping_street": (data.get("street") or "").strip(),
+            "shipping_street_number": (data.get("street_number") or "").strip(),
+            "shipping_floor": (data.get("floor") or "").strip(),
+            "shipping_department": (data.get("department") or "").strip(),
+            "shipping_city": (data.get("city") or "").strip(),
+            "shipping_province": province,
+            "shipping_agency_id": (data.get("agency_id") or "").strip(),
+        }
+        if shipping_method == "correoargentino" and shipping_modality == "sucursal":
+            missing_contact = [
+                field for field in ("shipping_full_name", "shipping_phone")
+                if not address_fields[field]
+            ]
+            if missing_contact or not province:
+                return Response(
+                    {"detail": "Falta completar nombre, teléfono y provincia para retirar en sucursal."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not address_fields["shipping_agency_id"]:
+                return Response(
+                    {"detail": "Falta elegir una sucursal de Correo Argentino."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif shipping_method == "correoargentino" and shipping_modality == "domicilio":
+            missing_address = [
+                field for field in ("shipping_street", "shipping_street_number", "shipping_city")
+                if not address_fields[field]
+            ]
+            if missing_address or not province:
+                return Response(
+                    {"detail": "Falta completar la dirección para el envío a domicilio."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         if shipping_cost > 0:
             items_for_mp.append({
@@ -177,6 +230,7 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             shipping_postal_code=postal_code,
             shipping_method=shipping_method,
             shipping_modality=shipping_modality,
+            **address_fields,
             external_reference=external_reference,
             customer_email=(
                 data.get("customer_email", "")

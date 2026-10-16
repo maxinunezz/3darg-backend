@@ -1,20 +1,45 @@
-"""Resolución de provincia (ISO 3166-2:AR, sin el prefijo "AR-") a partir
-del código postal.
+"""Catálogo de provincias argentinas + resolución de provincia (ISO
+3166-2:AR, sin el prefijo "AR-") a partir del código postal.
 
-Envíopack exige `provincia` para cotizar (ver `/cotizar/costo`), pero esta
-tienda hoy solo le pide al comprador el código postal en el checkout — y el
-sistema viejo de códigos postales de 4 dígitos NO tiene un mapeo 1:1
-confiable a provincia (los rangos históricos no son contiguos). Por eso
-esta función cubre ÚNICAMENTE bloques inequívocos y bien conocidos; para
-cualquier otro código devuelve `None` y quien la llama cae al fallback de
-tarifa plana en vez de arriesgar una provincia incorrecta (que Envíopack
-podría aceptar igual y cotizar mal, sin avisar del error).
-
-Lo ideal a mediano plazo: que el formulario de checkout le pida la
-provincia directo al comprador (lo más común en un checkout argentino) y la
-mande en el body de `/api/shipping/calculate` (`province`) — ahí esta
-función ni se usa. Ver `shipping/views.py`.
+Desde la integración directa con Correo Argentino (PaqAr v2), la provincia
+ya no se infiere más: se le pide directo al comprador en el formulario de
+dirección del checkout (`ShippingAddressSerializer`, reusado por
+`payments`) — PaqAr v2 la exige como parte de `shippingData.address`, y
+listar sucursales (`GET /v1/agencies`) también necesita el código real
+(`stateId`). `resolve_provincia_ar()` queda de todos modos para la
+cotización "preview" del carrito (`ShippingCalculateSerializer.province`,
+opcional) cuando todavía no se completó el formulario de dirección.
 """
+
+# (código ISO 3166-2:AR sin prefijo, nombre) — 24 provincias + CABA, el
+# mismo catálogo que usa Correo Argentino en `stateId`. Espejado en el
+# frontend (`types/`), no tocar uno sin el otro.
+AR_PROVINCES: list[tuple[str, str]] = [
+    ("C", "Ciudad Autónoma de Buenos Aires"),
+    ("B", "Buenos Aires"),
+    ("K", "Catamarca"),
+    ("H", "Chaco"),
+    ("U", "Chubut"),
+    ("X", "Córdoba"),
+    ("W", "Corrientes"),
+    ("E", "Entre Ríos"),
+    ("P", "Formosa"),
+    ("Y", "Jujuy"),
+    ("L", "La Pampa"),
+    ("F", "La Rioja"),
+    ("M", "Mendoza"),
+    ("N", "Misiones"),
+    ("Q", "Neuquén"),
+    ("R", "Río Negro"),
+    ("A", "Salta"),
+    ("J", "San Juan"),
+    ("D", "San Luis"),
+    ("Z", "Santa Cruz"),
+    ("S", "Santa Fe"),
+    ("G", "Santiago del Estero"),
+    ("V", "Tierra del Fuego"),
+    ("T", "Tucumán"),
+]
 
 # (código_postal_desde, código_postal_hasta, código ISO 3166-2:AR)
 # Rangos públicos de CPA de Correo Argentino. Ampliar solo con bloques

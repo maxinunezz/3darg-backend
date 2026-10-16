@@ -5,81 +5,50 @@
   cobra nada).
 - `payments/views.py::MercadoPagoCheckoutProCreateAPIView` — cotización REAL
   que se cobra en el checkout, para que el monto que paga el comprador
-  incluya el envío (antes no se cobraba nada de envío).
+  incluya el envío.
 
-Un solo lugar de verdad para el fallback de tarifa plana y la normalización
-de la respuesta de Envíopack, para que el precio mostrado en el carrito y el
-que efectivamente se cobra en MercadoPago sean siempre el mismo cálculo.
+A diferencia de una iteración anterior de esta integración (que asumía que
+Correo Argentino no tenía cotización en vivo), la API real de MiCorreo SÍ
+tiene un endpoint de cotización (`POST /rates`,
+`correo_argentino.py::get_rates()`) — se intenta primero, por cada
+modalidad, y se cae a la tabla estática de respaldo (`tariff.py`) solo
+cuando no se puede cotizar en vivo: sin credenciales, error de red, o sin
+código postal de destino conocido (caso típico del selector de sucursal,
+que no le pide CP al comprador — ver `shipping-estimator.tsx`).
+
+Las dos modalidades (sucursal y domicilio) son Correo Argentino
+(`correoargentino_sucursal` / `correoargentino_domicilio`) — Andreani salió
+del selector del carrito (reemplazado por completo, ver CLAUDE.md →
+"Envíos") y su código de respaldo por zona de CP queda en el historial de
+git, no en este módulo.
+
+Un solo lugar de verdad para que el precio mostrado en el carrito y el que
+efectivamente se cobra en MercadoPago sean siempre el mismo cálculo.
 """
 import logging
 from decimal import Decimal
 
 from django.conf import settings
 
-from . import enviopack
-from .postal import resolve_provincia_ar
+from . import correo_argentino, tariff
 from .volumetric import ShipmentItem, calculate_billable_weight
 
 logger = logging.getLogger(__name__)
 
+_METHOD_LABELS = {
+    ("correoargentino", "sucursal"): "Correo Argentino a sucursal",
+    ("correoargentino", "domicilio"): "Correo Argentino a domicilio",
+}
 
-def _fallback_quote(postal_code: str) -> dict:
-    """Tarifa plana de respaldo cuando Envíopack falla, da timeout, no está
-    configurado, o no devuelve ninguna tarifa de los couriers activos.
-
-    Configurable 100% por `SHIPPING_FALLBACK_RATES_JSON` (.env) — nunca
-    hardcodeada acá. `zones` es una aproximación por primer dígito del
-    código postal (no es una zonificación precisa, ver postal.py), pensada
-    solo como red de contención, no como tarifa real de courier.
-    """
-    rates = settings.SHIPPING_FALLBACK_RATES
-    zone_rate = rates.get("zones", {}).get(postal_code[:1]) if postal_code else None
-    price = zone_rate if zone_rate is not None else rates.get("default", 0)
-    return {
-        "carrier": "Tarifa estimada",
-        "service": "standard",
-        "modality": "domicilio",
-        "price": price,
-        "delivery_days": None,
-        "is_fallback": True,
-    }
+# (modalidad interna, "deliveredType" real de la API) — "S"/"D" confirmado
+# literal en la doc ("D" (no "S") envío a domicilio, "S" envío a sucursal).
+_MODALITIES = (("sucursal", "S"), ("domicilio", "D"))
 
 
-def _normalize_quotes(raw_quotes: list[dict]) -> list[dict]:
-    """Traduce la respuesta cruda de Envíopack a un shape limpio y estable
-    para el frontend, filtrando solo los couriers activos configurados en
-    `settings.ENVIOPACK_COURIERS` (Correo Argentino / Andreani)."""
-    allowed = set(settings.ENVIOPACK_COURIERS)
-    normalized = []
-    for q in raw_quotes:
-        correo = q.get("correo") or {}
-        courier_id = correo.get("id", "")
-        if allowed and courier_id not in allowed:
-            continue
-
-        horas_entrega = q.get("horas_entrega")
-        try:
-            price = float(q.get("valor", 0))
-        except (TypeError, ValueError):
-            continue
-
-        normalized.append({
-            "carrier": correo.get("nombre", courier_id),
-            "service": q.get("servicio"),
-            "modality": "sucursal" if q.get("modalidad") == "S" else "domicilio",
-            "price": price,
-            "delivery_days": round(horas_entrega / 24, 1) if horas_entrega else None,
-            "is_fallback": False,
-        })
-    return normalized
-
-
-def _build_shipment_items(items: list[tuple]) -> tuple[list[ShipmentItem], list[tuple]]:
-    """`items`: lista de `(product, quantity)`. Devuelve `(shipment_items,
-    package_dims_cm)` listos para `calculate_billable_weight()`/`enviopack.get_quotes()`."""
+def _build_shipment_items(items: list[tuple]) -> list[ShipmentItem]:
+    """`items`: lista de `(product, quantity)`. Devuelve los `ShipmentItem`
+    listos para `calculate_billable_weight()`."""
     shipment_items = []
-    package_dims = []
-    default_dims = settings.SHIPPING_DEFAULT_ITEM_DIMENSIONS_CM
     for product, quantity in items:
         shipment_items.append(ShipmentItem(
             quantity=quantity,
@@ -88,108 +57,148 @@ def _build_shipment_items(items: list[tuple]) -> tuple[list[ShipmentItem], list[
             width_cm=product.width_cm,
             height_cm=product.height_cm,
         ))
-        dims = (
-            product.length_cm or default_dims[0],
-            product.width_cm or default_dims[1],
-            product.height_cm or default_dims[2],
-        )
-        package_dims.extend([dims] * quantity)
-    return shipment_items, package_dims
+    return shipment_items
 
 
-def get_quotes(*, postal_code: str, province: str | None, items: list[tuple]) -> dict:
-    """Cotiza el envío de `items` (lista de `(product, quantity)`) a
-    `postal_code`. Si `province` no viene, se intenta resolver desde el
-    código postal (`resolve_provincia_ar`); si no se puede resolver, se cae
-    directo al fallback de tarifa plana (nunca se le manda una provincia
-    adivinada a Envíopack).
+def _infer_declared_value(items: list[tuple]) -> Decimal:
+    """Si no se manda `declared_value` explícito (ej. la cotización preview
+    del carrito, antes de resolver descuentos), se infiere del precio de
+    lista — un valor aproximado alcanza para calcular el cargo de Valor
+    Declarado, que es una fracción chica del total."""
+    total = Decimal("0")
+    for product, quantity in items:
+        price = getattr(product, "price", None)
+        if price is not None:
+            total += Decimal(str(price)) * quantity
+    return total
 
-    Devuelve `{postal_code, billable_weight_kg, quotes: [...]}` — siempre
-    con al menos una cotización (el fallback garantiza eso).
+
+def _raw_weight_grams_and_dims(items: list[tuple]) -> tuple[int, dict]:
+    """Peso real total (en gramos, sin volumétrico) y dimensiones del bulto
+    — la API real de Correo Argentino (`/rates`) pide esto directo, a
+    diferencia de la tabla de respaldo que trabaja con peso facturable
+    (volumétrico). Usa las medidas más grandes entre los ítems como proxy
+    del bulto único (mismo criterio que `correo_argentino.py::_parcel_weight_and_dims()`,
+    duplicado acá porque ese toma un `Order` ya persistido y acá todavía no
+    existe — se cotiza antes de crear la orden)."""
+    default_l, default_w, default_h = settings.SHIPPING_DEFAULT_ITEM_DIMENSIONS_CM
+    total_weight_kg = Decimal("0")
+    max_l, max_w, max_h = Decimal(str(default_l)), Decimal(str(default_w)), Decimal(str(default_h))
+
+    for product, quantity in items:
+        if getattr(product, "weight_kg", None):
+            total_weight_kg += Decimal(str(product.weight_kg)) * quantity
+        if getattr(product, "length_cm", None) and product.length_cm > max_l:
+            max_l = Decimal(str(product.length_cm))
+        if getattr(product, "width_cm", None) and product.width_cm > max_w:
+            max_w = Decimal(str(product.width_cm))
+        if getattr(product, "height_cm", None) and product.height_cm > max_h:
+            max_h = Decimal(str(product.height_cm))
+
+    if total_weight_kg <= 0:
+        total_weight_kg = Decimal(str(settings.SHIPPING_MIN_WEIGHT_KG))
+
+    weight_grams = int((total_weight_kg * 1000).to_integral_value(rounding="ROUND_HALF_UP"))
+    return weight_grams, {"height": int(max_h), "width": int(max_w), "length": int(max_l)}
+
+
+def _delivery_days_label(rate: dict) -> str | None:
+    dmin, dmax = rate.get("deliveryTimeMin"), rate.get("deliveryTimeMax")
+    if dmin is None and dmax is None:
+        return None
+    if dmin == dmax:
+        return f"{dmin} días hábiles"
+    return f"{dmin} a {dmax} días hábiles"
+
+
+def get_quotes(*, postal_code: str, items: list[tuple], declared_value: Decimal | None = None) -> dict:
+    """Cotiza el envío de `items` (lista de `(product, quantity)`) para las
+    dos modalidades que deja elegir el checkout: Correo Argentino a
+    sucursal y a domicilio. Intenta la cotización EN VIVO (`POST /rates`)
+    cuando se conoce `postal_code` de destino; si no (sin CP, sin
+    credenciales, o falla la consulta), cae a la tabla de respaldo por
+    modalidad — nunca deja una modalidad sin cotizar.
+
+    Devuelve `{postal_code, billable_weight_kg, quotes: [...]}`, cada quote
+    con `is_fallback` indicando si vino de la tabla estática o de la API
+    real.
     """
-    province = province or resolve_provincia_ar(postal_code)
-    shipment_items, package_dims = _build_shipment_items(items)
-    billable_weight = calculate_billable_weight(shipment_items)
+    shipment_items = _build_shipment_items(items)
+    if declared_value is None:
+        declared_value = _infer_declared_value(items)
 
-    quotes: list[dict] = []
-    if province:
-        raw_quotes = enviopack.get_quotes(
-            postal_code=postal_code,
-            provincia=province,
-            weight_kg=billable_weight,
-            package_dims_cm=package_dims,
-        )
-        if raw_quotes is not None:
-            quotes = _normalize_quotes(raw_quotes)
-    else:
-        logger.info(
-            "No se pudo resolver provincia para codigo_postal=%s — se usa tarifa de respaldo",
-            postal_code,
+    billable_weight_ca = calculate_billable_weight(
+        shipment_items, divisor=settings.SHIPPING_CORREO_ARGENTINO_VOLUMETRIC_DIVISOR,
+    )
+
+    live_rates = None
+    postal_code = (postal_code or "").strip()
+    if postal_code:
+        weight_grams, dims = _raw_weight_grams_and_dims(items)
+        live_rates = correo_argentino.get_rates(
+            postal_code_destination=postal_code,
+            weight_grams=weight_grams,
+            height_cm=dims["height"],
+            width_cm=dims["width"],
+            length_cm=dims["length"],
         )
 
-    if not quotes:
-        quotes = [_fallback_quote(postal_code)]
+    quotes = []
+    for modality, delivered_type in _MODALITIES:
+        live_entry = None
+        if live_rates:
+            live_entry = next((r for r in live_rates if r.get("deliveredType") == delivered_type), None)
+
+        if live_entry and live_entry.get("price") is not None:
+            quotes.append({
+                "carrier": "Correo Argentino",
+                "service": live_entry.get("productName") or live_entry.get("productType") or settings.CORREO_ARGENTINO_PRODUCT_TYPE,
+                "modality": modality,
+                "price": float(live_entry["price"]),
+                "delivery_days": _delivery_days_label(live_entry),
+                "is_fallback": False,
+            })
+        else:
+            price = float(tariff.correo_argentino_fallback_price(billable_weight_ca, declared_value))
+            quotes.append({
+                "carrier": "Correo Argentino",
+                "service": settings.CORREO_ARGENTINO_PRODUCT_TYPE,
+                "modality": modality,
+                "price": price,
+                "delivery_days": None,
+                "is_fallback": True,
+            })
 
     return {
         "postal_code": postal_code,
-        "billable_weight_kg": float(billable_weight),
+        "billable_weight_kg": float(billable_weight_ca),
         "quotes": quotes,
     }
 
 
 def cheapest_price(quotes: list[dict]) -> Decimal:
-    """La cotización que efectivamente se cobra en el checkout: la más
-    barata de las devueltas por `get_quotes()` (nunca se le ofrece al
-    comprador pagar de más si hay una opción más barata disponible)."""
+    """La cotización que efectivamente se cobra en el checkout cuando no
+    hay un método explícito elegido: la más barata de las devueltas por
+    `get_quotes()`."""
     return Decimal(str(min(q["price"] for q in quotes)))
 
 
-_METHOD_LABELS = {
-    ("correoargentino", "sucursal"): "Correo Argentino a sucursal",
-    ("andreani", "domicilio"): "Andreani a domicilio",
-}
-
-
 def select_methods(quotes: list[dict]) -> list[dict]:
-    """Recorta las cotizaciones normalizadas a los métodos que el checkout
-    deja elegir al comprador: Correo Argentino en modalidad "sucursal" y
-    Andreani en modalidad "domicilio" (la combinación que pidió el dueño,
-    ver CLAUDE.md del carrito). Si Envíopack no devolvió alguna de las dos
-    combinaciones para ese código postal, esa opción no aparece — el
-    frontend tiene que tolerar listas de 1.
-
-    Si `quotes` es el único fallback plano (sin Envíopack disponible),
-    se devuelve tal cual como única opción.
-    """
-    if len(quotes) == 1 and quotes[0].get("is_fallback"):
-        fallback = quotes[0]
-        return [{
-            "id": "fallback_domicilio",
-            "carrier": fallback["carrier"],
-            "modality": fallback["modality"],
-            "label": fallback["carrier"],
-            "price": fallback["price"],
-            "delivery_days": fallback["delivery_days"],
-            "is_fallback": True,
-        }]
-
+    """Traduce las cotizaciones de `get_quotes()` a los métodos que el
+    checkout deja elegir al comprador, con el `id` estable que viaja como
+    `shipping_method_id` (ej. "correoargentino_sucursal")."""
     methods = []
-    for (carrier_id, modality), label in _METHOD_LABELS.items():
-        candidates = [
-            q for q in quotes
-            if q["modality"] == modality and carrier_id in q["carrier"].lower().replace(" ", "")
-        ]
-        if not candidates:
-            continue
-        cheapest = min(candidates, key=lambda q: q["price"])
+    for q in quotes:
+        carrier_id = "correoargentino"
+        label = _METHOD_LABELS.get((carrier_id, q["modality"]), q["carrier"])
         methods.append({
-            "id": f"{carrier_id}_{modality}",
-            "carrier": cheapest["carrier"],
-            "modality": modality,
+            "id": f"{carrier_id}_{q['modality']}",
+            "carrier": q["carrier"],
+            "modality": q["modality"],
             "label": label,
-            "price": cheapest["price"],
-            "delivery_days": cheapest["delivery_days"],
-            "is_fallback": False,
+            "price": q["price"],
+            "delivery_days": q["delivery_days"],
+            "is_fallback": q["is_fallback"],
         })
     return methods
 

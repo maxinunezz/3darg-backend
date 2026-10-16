@@ -57,9 +57,24 @@ ML_CLIENT_ID=...  ML_CLIENT_SECRET=...  ML_REDIRECT_URI=...  ML_SITE_ID=MLA   # 
 BAMBUDDY_URL=...  BAMBUDDY_API_KEY=...  BAMBUDDY_PRINTER_ID=1   # cola de impresión automática, vacío = apagado
 PRESUPUESTOS3D_API_URL=...  PRESUPUESTOS3D_API_TOKEN=...        # aviso de venta online, vacío = apagado (ver sección dedicada)
 
-ENVIOPACK_API_KEY=...  ENVIOPACK_SECRET_KEY=...   # cotización real de envío (Correo Argentino/Andreani), vacío = fallback de tarifa plana (ver sección dedicada "Envíos — selector Correo Argentino/Andreani")
-SHIPPING_FALLBACK_RATES_JSON={"default": 6500, "zones": {}}   # tarifa de respaldo cuando Envíopack no está configurado/falla
+SHIPPING_FALLBACK_RATES_JSON={"default": 6500, "zones": {}}   # tarifa de emergencia si falta el código postal (caso límite, ya no es de Andreani)
+
+CORREO_ARGENTINO_TEST_MODE=1          # usa apitest.correoargentino.com.ar/micorreo/v1 mientras se prueba
+CORREO_ARGENTINO_BASE_URL=            # vacío = default según TEST_MODE (test o api.correoargentino.com.ar/micorreo/v1)
+CORREO_ARGENTINO_USER=  CORREO_ARGENTINO_PASSWORD=   # credenciales reales de MiCorreo (HTTP Basic contra POST /token)
+CORREO_ARGENTINO_CUSTOMER_ID=         # customerId de la cuenta MiCorreo del dueño — vacío = alta/agencies/rates reales apagados
+CORREO_ARGENTINO_PRODUCT_TYPE=CP      # "Correo Argentino Clásico"
+CORREO_ARGENTINO_TIMEOUT=8
+CORREO_ARGENTINO_SENDER_NAME=  CORREO_ARGENTINO_SENDER_PHONE=  CORREO_ARGENTINO_SENDER_EMAIL=
+CORREO_ARGENTINO_SENDER_STREET=  CORREO_ARGENTINO_SENDER_STREET_NUMBER=  CORREO_ARGENTINO_SENDER_CITY=
+CORREO_ARGENTINO_SENDER_PROVINCE=     # código AR_PROVINCES
+CORREO_ARGENTINO_SENDER_ZIP=          # también es el postalCodeOrigin que se manda a POST /rates
+CORREO_ARGENTINO_TARIFF_JSON={"1":20400,"5":32000,"10":45200,"15":56000,"20":65800,"25":80900}   # tabla de respaldo, ver abajo
+CORREO_ARGENTINO_VALOR_DECLARADO_JSON={"brackets":[[20000,600],[200000,"3%"]]}                    # idem, cargo adicional
+SHIPPING_CORREO_ARGENTINO_VOLUMETRIC_DIVISOR=6000
 ```
+
+Ver sección dedicada "Envíos — Correo Argentino directo (API MiCorreo), sucursal Y domicilio" más abajo.
 
 El mismo `.env` es leído por los servicios `db` y `web` en `docker-compose.yml`.
 
@@ -102,6 +117,7 @@ Todas las rutas montadas en `config/urls.py`. Prefijo común: `/api/`.
 | `products` | `/api/` | `GET /products/` (filtros: `?search=`, `?brand_slug=`, `?is_featured=`, `?is_available=`, `?category__slug=`), `GET /products/<slug>/`, `GET /categories/?brand_slug=` |
 | `cart` | `/api/cart/` | `GET\|DELETE /` (exigen `?brand_slug=`), `POST /items/` (exige `brand_slug` en el body), `PATCH\|DELETE /items/<id>/` — **todo requiere auth**. Sin `brand_slug` → 400 |
 | `orders` | `/api/orders/` | `GET /` (lista del usuario, filtrable por `?status=`), `GET /<uuid>/`, `GET /summary/` (totales + counts por status) |
+| `shipping` | `/api/shipping/` | `POST /calculate/` — cotización de Correo Argentino a sucursal y a domicilio (en vivo contra `POST /rates` si hay CP+credenciales, si no tabla de respaldo), `AllowAny`; `GET /agencies/?province=<code>` — sucursales reales de Correo Argentino (API MiCorreo), `[]` sin credenciales cargadas (ver sección "Envíos" más abajo) |
 | `payments` | `/api/payments/` | `POST /mp/checkout-pro/`, `POST /mp/webhook/`, `GET /checkout/success/` (template HTML server-rendered) |
 | `cms` | `/api/cms/` | `GET /pages/<brand_slug>/<page_slug>/` |
 | `contact` | `/api/contact/` | `POST /` — manda email a `CONTACT_EMAIL` + confirmación al usuario (throttle 5/h por IP) |
@@ -280,22 +296,38 @@ Dirección opuesta a la de arriba: acá es `presupuestos3d` el que empuja datos 
 
 ---
 
-## Envíos — selector Correo Argentino/Andreani (código listo, en espera de alta en Envíopack)
+## Envíos — Correo Argentino directo (API MiCorreo), sucursal Y domicilio
 
-El carrito ya deja elegir entre **"Correo Argentino a sucursal"** y **"Andreani a domicilio"**, cobrando en el checkout el precio real del método que elija el comprador (antes siempre se cobraba el más barato sin mostrar opciones). Toda la implementación está terminada y verificada — lo único que falta para que muestre tarifas reales es completar el alta de una cuenta en Envíopack (agregador que cotiza contra los couriers reales).
+Se descartó **Envíopack** (agregador, trámite comercial nunca se destrabó) a favor de una integración **directa** con la API real de Correo Argentino (**API MiCorreo**, cuenta del dueño en el panel de MiCorreo, `customerId` propio). **Andreani se reemplazó por completo** — el dueño recibió de Andreani un pedido de reunión comercial (CUIT, volumen mensual, logística actual, etc.) para dar de alta la cuenta, y en cambio se optó por consolidar todo en un solo courier: Correo Argentino cubre **las dos modalidades de entrega** (sucursal y domicilio).
 
-- **Código implicado** (todo ya escrito, sin pendientes de código): `shipping/services/quote.py` (`get_quotes()`, `select_methods()`, `cheapest_price()`, `default_fallback_price()`), `shipping/services/enviopack.py` (cliente HTTP), `shipping/services/postal.py` (`resolve_provincia_ar()`), `shipping/views.py`, `payments/serializers.py`/`payments/views.py` (`shipping_method_id`), `orders/models.py` (`shipping_method`/`shipping_modality`) + migración `orders/migrations/0006_shipping_method_modality.py`, `orders/admin.py`. Frontend: `ecommerce-frontend/components/shipping-estimator.tsx` (selector completo, radios + "Cambiar CP" + "Ver direcciones") y el `shipping_method_id` ya se manda desde `cart-page-content.tsx`/`site/cart-content.tsx`.
-- **Bloqueado en**: `ENVIOPACK_API_KEY`/`ENVIOPACK_SECRET_KEY` están vacíos en todos los entornos (dev y Railway) — nadie creó todavía la cuenta de Envíopack. Sin esas credenciales, `enviopack.get_quotes()` devuelve `None` siempre (log: *"Envíopack no configurado, se usa la tarifa de respaldo"*) y el carrito cae a una única tarifa plana (`SHIPPING_FALLBACK_RATES_JSON`) — **es el comportamiento esperado, no un bug**: nunca van a aparecer las dos opciones reales hasta cargar las credenciales.
-- **Trámite en curso (2026-10-14)**: Envíopack no tiene alta de cuenta 100% self-service para integraciones de API custom (no Tiendanube/Mercado Libre) — piden pasar por `https://www.enviopack.com.ar/contacto` para que el equipo comercial dé de alta y entregue `api-key`/`secret-key`. El dueño va a escribir ahí; está pendiente la respuesta de ellos.
+> Ojo si leés historial de git/commits viejos de esta sección: la primera integración se escribió contra una API asumida ("PaqAr v2", `Apikey`/`agreement`, `create_order()`/`get_labels()`/`cancel_order()`) que **no es la API real** — se reescribió de punta a punta contra el PDF oficial "Correo Argentino - API MiCorreo" y el panel real del dueño. Lo que sigue describe la versión real, vigente.
 
-### Para retomar cuando lleguen las credenciales
+El carrito deja elegir entre **"Retirar en sucursal"** (default, desplegado) y **"Envío a domicilio"**, las dos con Correo Argentino.
 
-1. Cargar `ENVIOPACK_API_KEY`/`ENVIOPACK_SECRET_KEY` en `3darg-backend/.env` (dev) y en las variables del servicio `web` en Railway (prod).
-2. `docker compose restart web` (dev) / redeploy en Railway (prod).
-3. Probar `POST /api/shipping/calculate/` con un código postal de CABA (`1000`–`1499`, el único rango que hoy resuelve `resolve_provincia_ar()` en `shipping/services/postal.py`) y confirmar que la respuesta trae `methods` con 2 entradas (`andreani_domicilio` + `correoargentino_sucursal`) en vez de una sola `fallback_domicilio`.
-4. **Si hace falta cotizar fuera de CABA**: `resolve_provincia_ar()` solo resuelve ese rango a propósito (evita adivinar mal la provincia y cotizar con datos incorrectos, ver comentario en el archivo). Para ampliar cobertura: sumar rangos verificados a `_KNOWN_RANGES`, o — mejor a mediano plazo — pedirle la provincia directo al comprador en el checkout (`ShippingCalculateSerializer` ya acepta `province` opcional para este caso).
-5. Verificar en el navegador (`/lumy/cart` con productos en el carrito) que aparecen los dos radios con precio real y que el total se actualiza al elegir uno.
-6. Completar un checkout de prueba (sandbox MercadoPago) y confirmar en el admin que el `Order` creado tiene `shipping_method`/`shipping_modality` guardados según lo elegido.
+- **Auth** (`shipping/services/correo_argentino.py`): `POST /token` con HTTP Basic (`CORREO_ARGENTINO_USER`/`CORREO_ARGENTINO_PASSWORD`) devuelve un JWT de corta duración. `_get_token()` lo cachea en memoria (thread-safe, `threading.Lock()`, mismo patrón que ya usa la integración de Mercado Libre para su `access_token`) y lo renueva solo cuando está por vencer — no pide un token nuevo en cada request.
+- **Cotización** (`shipping/services/quote.py::get_quotes()`): intenta primero cotización **EN VIVO** contra `POST /rates` (`correo_argentino.py::get_rates()`) cuando se conoce el código postal de destino (típico del checkout a domicilio; el selector de sucursal no lo pide) y hay credenciales cargadas. Si no — sin CP, sin credenciales, o falla la consulta — cae a la tabla estática de respaldo (`tariff.py::correo_argentino_fallback_price()`), por cada modalidad por separado: nunca deja una modalidad sin cotizar. `payments/views.py::MercadoPagoCheckoutProCreateAPIView` llama a `get_quotes()` SIEMPRE que no aplique el umbral de envío gratis. Si viene `shipping_method_id` (del selector del carrito) matchea contra `select_methods()`; si no matchea nada, cae al más barato (`cheapest_price()`).
+  - `tariff.py::correo_argentino_fallback_price()`: tabla de tramos por peso facturable (hasta 1/5/10/15/20/25 kg, columna "Nacional" del tarifario real de Correo Clásica) + cargo por "Valor Declarado" sobre el subtotal del carrito (`CORREO_ARGENTINO_TARIFF_JSON`/`CORREO_ARGENTINO_VALOR_DECLARADO_JSON`, configurables sin tocar código). Usa divisor volumétrico **6000** (no 5000, el del resto) — `calculate_billable_weight(items, divisor=...)` quedó parametrizado en `shipping/services/volumetric.py`.
+  - `select_methods()` siempre devuelve las dos entradas (`correoargentino_sucursal` y `correoargentino_domicilio`), cada una con su propio `is_fallback` según si esa modalidad puntual se resolvió con `/rates` en vivo o con la tabla de respaldo.
+- **Dirección del comprador — distinta según la modalidad** (la API real NO exige dirección completa para sucursal, a diferencia de lo que asumía la integración vieja): `payments/views.py` valida distinto por modalidad:
+  - **sucursal**: solo `full_name` + `phone` + `province` + `agency_id` (elegido de `GET /api/shipping/agencies/`) — `correo_argentino.py::_build_shipment_payload()` manda `shipping.agency = order.shipping_agency_id`, sin armar ninguna dirección aproximada.
+  - **domicilio**: `full_name` + `phone` + `street` + `street_number` + `city` + `province` (dirección real del comprador, sin `agency_id`) — `_build_shipment_payload()` manda `shipping.address` con esos campos.
+  - Se persiste en `Order` (`shipping_full_name`/`shipping_phone`/`shipping_street`/`shipping_street_number`/`shipping_floor`/`shipping_department`/`shipping_city`/`shipping_province`/`shipping_agency_id`).
+- **Catálogo de provincias**: `shipping/services/postal.py::AR_PROVINCES` (24 provincias, código ISO 3166-2:AR de una letra) — espejo exacto de `ecommerce-frontend/types/shipping.ts::AR_PROVINCES`, no tocar uno sin el otro.
+- **Sucursales reales**: `GET /api/shipping/agencies/?province=<code>` (`AgenciesListAPIView`) → `correo_argentino.py::list_agencies(province_code)` → `GET /agencies` de la API real (respuesta anidada: `code`, `name`, `services.pickupAvailability`, `location.address.{streetName,streetNumber,city,...}`, ver el tipo `Agency` en `shipping-estimator.tsx`). Solo tiene sentido para la modalidad sucursal. Sin credenciales cargadas devuelve `[]` sin romper (mismo criterio "vacío = apagado" de siempre).
+- **Alta real del envío** (`correo_argentino.py::create_shipment(order)`): `POST /shipping/import`, usa `order.external_reference` como `extOrderId` (idempotente ante reintentos — la API responde "La orden ya fue importada con anterioridad" si se repite, no es un error real). **La respuesta real de éxito es solo `{"createdAt": ...}` — no devuelve ningún tracking number.** Por eso `correo_argentino_tracking_number` (nombre de campo heredado, no se migra) en realidad guarda nuestro propio `extOrderId` (= `order.external_reference`), que es el identificador real que tiene Correo Argentino de ese envío — no lo uses para buscarlo en el panel de MiCorreo salvo que confirmes que ahí también se indexa por `extOrderId`.
+- **No hay endpoint de generación de etiquetas ni de cancelación en la API real** (a diferencia de lo que asumía la integración vieja) — no hay nada que llamar para esos dos casos:
+  - `orders/signals.py::_cancel_correo_argentino_shipment()`: si el pedido pasa `PAID → REJECTED/CANCELLED` y ya tenía un envío dado de alta, solo **loguea un warning** para que el dueño lo cancele a mano desde el panel de MiCorreo.
+  - No existe acción de admin "Generar etiqueta" (se eliminó, junto a su template).
+- **Tracking**: `correo_argentino.py::get_tracking(shipping_id)` → `GET /shipping/tracking` (toma un solo `shippingId` por llamada, pese al verbo GET el filtro va en el body — confirmado en la doc). El admin (`orders/admin.py::consultar_tracking_correo_argentino`) lo llama una vez por orden seleccionada, no en batch.
+- **Alta en el signal** (`orders/signals.py::_create_correo_argentino_shipment`): al confirmarse el pago (`PAID`), si `order.shipping_method == "correoargentino"` (cualquiera de las dos modalidades) se llama `create_shipment(order)` en try/except no bloqueante — guarda `correo_argentino_tracking_number = order.external_reference` en éxito, o el mensaje en `correo_argentino_sync_error` si falla (nunca rompe la confirmación de pago ni el mail de confirmación).
+- **Admin** (`orders/admin.py`): ficha de `Order` muestra todos los campos de dirección + `correo_argentino_tracking_number`/`correo_argentino_sync_error`. Acciones: *"Reintentar alta en Correo Argentino"* y *"Consultar estado de envío en Correo Argentino"* — no hay "Generar etiqueta" (no existe ese endpoint).
+- **Vacío `CORREO_ARGENTINO_USER`/`CORREO_ARGENTINO_PASSWORD`/`CORREO_ARGENTINO_CUSTOMER_ID` = alta real/`agencies`/`rates` en vivo apagados** (mismo criterio de siempre) — pero **la cotización sigue funcionando igual** vía la tabla de respaldo, solo que sin la cotización en vivo de `/rates`.
+
+### Pendiente del dueño (no bloquea el código)
+
+Cargar las credenciales reales de MiCorreo (`CORREO_ARGENTINO_USER`/`CORREO_ARGENTINO_PASSWORD`/`CORREO_ARGENTINO_CUSTOMER_ID`) + los datos de remitente (`CORREO_ARGENTINO_SENDER_*`) en `3darg-backend/.env` (dev) y en las variables del servicio `web` en Railway (prod). Sin esto, el alta real de la guía no se dispara (queda en `correo_argentino_sync_error`) y no hay cotización en vivo ni listado real de sucursales — todo lo demás (cotización por tabla de respaldo, selector, checkout, guardado de dirección) funciona igual para las dos modalidades.
+
+**Andreani queda completamente fuera del selector del carrito** — no hay plan de volver a integrarlo salvo que el dueño decida lo contrario más adelante (su código sigue recuperable del historial de git si hiciera falta).
 
 ---
 

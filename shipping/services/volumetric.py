@@ -31,7 +31,7 @@ def _item_dimensions_cm(item: ShipmentItem) -> tuple[Decimal, Decimal, Decimal]:
     return (Decimal(str(default_l)), Decimal(str(default_w)), Decimal(str(default_h)))
 
 
-def calculate_billable_weight(items: list[ShipmentItem]) -> Decimal:
+def calculate_billable_weight(items: list[ShipmentItem], divisor: Decimal | float | str | None = None) -> Decimal:
     """Peso facturable total del pedido: el mayor entre peso real y peso
     volumétrico (sumados por ítem), con un piso mínimo configurable
     (`settings.SHIPPING_MIN_WEIGHT_KG`) aplicado al TOTAL del pedido —no
@@ -42,8 +42,12 @@ def calculate_billable_weight(items: list[ShipmentItem]) -> Decimal:
     como 0 (no se inventa un peso real) — el volumétrico ya cubre ese caso,
     que es justamente el escenario típico de un cortante sin medidas
     cargadas todavía.
+
+    `divisor`: cada courier puede tener su propio divisor volumétrico (ej.
+    Correo Argentino usa 6000, no el 5000 general) — si no se pasa, se usa
+    `settings.SHIPPING_VOLUMETRIC_DIVISOR` (comportamiento histórico).
     """
-    divisor = Decimal(str(settings.SHIPPING_VOLUMETRIC_DIVISOR))
+    divisor = Decimal(str(divisor)) if divisor is not None else Decimal(str(settings.SHIPPING_VOLUMETRIC_DIVISOR))
     min_weight = Decimal(str(settings.SHIPPING_MIN_WEIGHT_KG))
 
     total_real = Decimal("0")

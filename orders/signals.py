@@ -12,6 +12,8 @@ from django.dispatch import receiver
 
 from brands.services.meta_conversions import hash_user_data, send_event as send_meta_event
 from products.models import Product
+from shipping.services import correo_argentino
+from shipping.services.correo_argentino import CorreoArgentinoConfigError, CorreoArgentinoError
 from .models import Order
 
 logger = logging.getLogger(__name__)
@@ -53,8 +55,10 @@ def handle_order_status_change(sender, instance, created, **kwargs):
         _trigger_bambuddy_print(instance)
         _send_meta_purchase_event(instance)
         _notify_presupuestos3d(instance)
+        _create_correo_argentino_shipment(instance)
     elif paid_undone:
         _restore_stock(instance)
+        _cancel_correo_argentino_shipment(instance)
 
 
 def _decrement_stock(order):
@@ -228,6 +232,75 @@ def _notify_presupuestos3d(order):
             "presupuestos3d error inesperado al avisar venta orden=%s: %s",
             order.id, e,
         )
+
+
+def _create_correo_argentino_shipment(order):
+    """Da de alta el envío real en Correo Argentino (API MiCorreo,
+    `POST /shipping/import`) cuando el pedido se paga, para cualquiera de
+    las dos modalidades (sucursal/domicilio).
+
+    Mismo patrón no-bloqueante que `_notify_presupuestos3d`/`_trigger_bambuddy_print`:
+    un fallo (sin credenciales, o la API rechazando el alta) se guarda en
+    `correo_argentino_sync_error` y se loguea, pero nunca rompe la
+    confirmación del pago. El dueño puede reintentar desde el admin
+    (acción "Reintentar alta en Correo Argentino").
+
+    La API real **no devuelve tracking number** en la respuesta (solo
+    `{"createdAt": ...}`) — el identificador del envío de cara a Correo
+    Argentino es nuestro propio `extOrderId`, que es `order.external_reference`.
+    Por eso `correo_argentino_tracking_number` se completa con ese mismo
+    valor en éxito, no con algo que devuelva la API.
+    """
+    if order.shipping_method != "correoargentino":
+        return
+
+    try:
+        correo_argentino.create_shipment(order)
+    except CorreoArgentinoConfigError as e:
+        logger.info(
+            "Correo Argentino no configurado — no se da de alta el envío de la orden %s: %s",
+            order.id, e,
+        )
+        order.correo_argentino_sync_error = str(e)
+        order.save(update_fields=["correo_argentino_sync_error"])
+        return
+    except CorreoArgentinoError as e:
+        logger.error("Correo Argentino: no se pudo dar de alta el envío de la orden %s: %s", order.id, e)
+        order.correo_argentino_sync_error = str(e)
+        order.save(update_fields=["correo_argentino_sync_error"])
+        return
+    except Exception as e:
+        logger.error("Correo Argentino: error inesperado al dar de alta el envío de la orden %s: %s", order.id, e)
+        order.correo_argentino_sync_error = str(e)
+        order.save(update_fields=["correo_argentino_sync_error"])
+        return
+
+    order.correo_argentino_tracking_number = order.external_reference
+    order.correo_argentino_sync_error = ""
+    order.save(update_fields=["correo_argentino_tracking_number", "correo_argentino_sync_error"])
+    logger.info(
+        "Correo Argentino: envío dado de alta — orden=%s extOrderId=%s",
+        order.id, order.external_reference,
+    )
+
+
+def _cancel_correo_argentino_shipment(order):
+    """La API real de Correo Argentino (MiCorreo) **no tiene endpoint de
+    cancelación** — a diferencia de lo asumido en una iteración anterior de
+    esta integración. Si el pedido ya tenía un envío dado de alta
+    (`correo_argentino_tracking_number`) y el pago se cae
+    (`PAID → REJECTED/CANCELLED`), solo se loguea para que el dueño lo
+    cancele a mano desde el panel de MiCorreo — no hay nada que llamar acá.
+    Nunca rompe la restitución de stock."""
+    if not order.correo_argentino_tracking_number:
+        return
+
+    logger.warning(
+        "Correo Argentino: la orden %s (extOrderId=%s) pasó a %s después de tener un envío "
+        "dado de alta — la API no tiene endpoint de cancelación, hay que cancelarlo a mano "
+        "desde el panel de MiCorreo.",
+        order.id, order.correo_argentino_tracking_number, order.status,
+    )
 
 
 def _send_meta_purchase_event(order):

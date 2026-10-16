@@ -8,16 +8,15 @@ pero en sentido inverso: ahí avisamos ventas pagadas, acá preguntamos costos
 para mostrarlos en la ficha de Precio/Stock/Canales del admin.
 
 Mismo criterio que el resto de las integraciones opcionales del proyecto
-(BamBuddy, Meta, Envíopack): vacío en `.env` = apagado, nunca rompe la
-pantalla del admin. Si el SKU no matchea ningún producto del lado de
+(BamBuddy, Meta, Correo Argentino): vacío en `.env` = apagado, nunca rompe
+la pantalla del admin. Si el SKU no matchea ningún producto del lado de
 presupuestos3d, `resultados` viene vacío — se traduce a `None` ("costo no
 disponible"), no es un error.
 
-No cacheamos la respuesta a propósito (mismo criterio que
-`shipping/services/enviopack.py` con el access token de Envíopack): el
-volumen de aperturas de ficha de producto en el admin es bajo y no justifica
-la complejidad de cachear. Si en algún momento se vuelve un cuello de
-botella, es la optimización obvia a agregar.
+No cacheamos la respuesta a propósito: el volumen de aperturas de ficha de
+producto en el admin es bajo y no justifica la complejidad de cachear. Si
+en algún momento se vuelve un cuello de botella, es la optimización obvia
+a agregar.
 """
 import logging
 

@@ -1,0 +1,30 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">Inicio</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+&rsaquo; <a href="{% url opts|admin_urlname:'changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+&rsaquo; Estado de envío
+</div>
+{% endblock %}
+
+{% block content %}
+<p>Estado de envío en Correo Argentino para {{ resultados|length }} orden(es):</p>
+
+{% for r in resultados %}
+    <fieldset class="module aligned" style="margin-bottom: 1.5em;">
+        <h2>Orden {{ r.order.id }} — guía {{ r.tracking_number }}</h2>
+        <p><strong>Último estado:</strong> {{ r.ultimo_estado }}</p>
+        <details>
+            <summary>Ver respuesta cruda de la API</summary>
+            <pre style="white-space: pre-wrap; max-height: 300px; overflow: auto;">{{ r.raw }}</pre>
+        </details>
+    </fieldset>
+{% endfor %}
+
+<div class="submit-row">
+    <a href="{% url opts|admin_urlname:'changelist' %}" class="button default">Volver</a>
+</div>
+{% endblock %}

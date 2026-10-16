@@ -44,42 +44,105 @@ BAMBUDDY_PRINTER_ID = int(os.getenv("BAMBUDDY_PRINTER_ID", "1"))  # ID de la imp
 PRESUPUESTOS3D_API_URL = os.getenv("PRESUPUESTOS3D_API_URL", "")      # ej: http://localhost:8001
 PRESUPUESTOS3D_API_TOKEN = os.getenv("PRESUPUESTOS3D_API_TOKEN", "")
 
-# --- Envíopack (cotización de envíos en tiempo real, ver app `shipping`) ---
-# Credenciales de tu cuenta en https://developers.enviopack.com.ar/autenticacion
-# (Api Key / Secret Key, no son las mismas que el login web). Vacío = el endpoint
-# /api/shipping/calculate/ cae directo a SHIPPING_FALLBACK_RATES — mismo criterio
-# "vacío = apagado" que BamBuddy/presupuestos3d/Google/Meta, no rompe el checkout.
-ENVIOPACK_API_URL = os.getenv("ENVIOPACK_API_URL", "https://api.enviopack.com")
-ENVIOPACK_API_KEY = os.getenv("ENVIOPACK_API_KEY", "")
-ENVIOPACK_SECRET_KEY = os.getenv("ENVIOPACK_SECRET_KEY", "")
-ENVIOPACK_TIMEOUT = float(os.getenv("ENVIOPACK_TIMEOUT", "8"))
-# IDs de courier devueltos por GET /correos de Envíopack (requiere las credenciales
-# de arriba) — "andreani" está confirmado en su doc pública; el de Correo Argentino
-# puede variar según cuenta/región, confirmar una vez con GET /correos y ajustar acá
-# si hace falta. Las tarifas de couriers no listados acá se descartan.
-ENVIOPACK_COURIERS = [
-    c.strip() for c in os.getenv("ENVIOPACK_COURIERS", "andreani,correoargentino").split(",") if c.strip()
-]
-
 # --- Cotización de envíos: parámetros de cálculo (ver shipping/services/volumetric.py) ---
 # Peso mínimo facturable por pedido (kg) — los cortantes son muy livianos, sin este
 # piso un pedido chico podría cotizar un flete casi nulo que no cubre el manipuleo real.
 SHIPPING_MIN_WEIGHT_KG = float(os.getenv("SHIPPING_MIN_WEIGHT_KG", "0.2"))
-# Divisor de peso volumétrico: kg = (largo × ancho × alto en cm) / divisor. 5000 es el
-# estándar más común en Argentina (Correo Argentino/Andreani) — puede variar según el
-# acuerdo comercial puntual, confirmar con tu ejecutivo de cuenta si da raro.
+# Divisor de peso volumétrico GENERAL (default de `calculate_billable_weight()`
+# cuando no se le pasa un `divisor` explícito): kg = (largo × ancho × alto en
+# cm) / divisor. 5000 es el estándar más común en Argentina. Hoy el único
+# consumidor real (Correo Argentino, sucursal y domicilio) siempre pasa su
+# propio divisor (`SHIPPING_CORREO_ARGENTINO_VOLUMETRIC_DIVISOR`, ver abajo),
+# así que este default queda sin uso activo — se deja como piso genérico por
+# si se suma otro courier con su propia cotización más adelante.
 SHIPPING_VOLUMETRIC_DIVISOR = float(os.getenv("SHIPPING_VOLUMETRIC_DIVISOR", "5000"))
 # Dimensiones de empaquetado por defecto en cm (largo, ancho, alto) para productos sin
 # length_cm/width_cm/height_cm cargados en el admin.
 SHIPPING_DEFAULT_ITEM_DIMENSIONS_CM = tuple(
     float(x) for x in os.getenv("SHIPPING_DEFAULT_ITEM_DIMENSIONS_CM", "15,15,5").split(",")
 )
-# Tarifa de respaldo si Envíopack falla/da timeout/no está configurado. JSON con un
-# precio default y, opcional, un desglose aproximado por primer dígito del código
-# postal (no es una zonificación precisa, es una red de contención). Ej:
-# SHIPPING_FALLBACK_RATES_JSON='{"default": 6500, "zones": {"1": 4500, "8": 9500}}'
+# Tarifa plana de emergencia cuando el checkout no recibió código postal (caso
+# límite, no debería pasar con el form de dirección obligatorio) — sin esto el
+# envío quedaría en $0 por omisión. Ya NO es específica de Andreani: desde que
+# Correo Argentino cubre sucursal Y domicilio con tarifa real (ver abajo),
+# Andreani salió del selector del carrito (queda en el historial de git si se
+# retoma más adelante). Ver shipping/services/quote.py::default_fallback_price().
 SHIPPING_FALLBACK_RATES = json.loads(
     os.getenv("SHIPPING_FALLBACK_RATES_JSON", "") or json.dumps({"default": 6500, "zones": {}})
+)
+
+# --- Correo Argentino (API MiCorreo real, NO "PaqAr v2") — integración directa,
+# sucursal Y domicilio ---
+# Confirmado contra la documentación oficial ("Correo Argentino - API
+# MiCorreo.pdf") y la cuenta real del dueño en MiCorreo (customerId
+# 0002005182): auth por HTTP Basic (`POST /token`) que devuelve un JWT con
+# vencimiento (`{"token", "expires"}`), usado después como
+# `Authorization: Bearer <token>` — NO es el esquema `Apikey`/`agreement`
+# que se asumió en una iteración anterior de esta integración (esa
+# documentación, "PaqAr v2", resultó ser de otro producto). A diferencia de
+# lo asumido antes, esta API SÍ tiene un endpoint de cotización real
+# (`POST /rates`) — se usa como cotización primaria, con la tabla estática
+# de abajo como fallback (sin red, o si falla la consulta en vivo). Ver
+# shipping/services/correo_argentino.py.
+CORREO_ARGENTINO_TEST_MODE = os.getenv("CORREO_ARGENTINO_TEST_MODE", "1") == "1"
+CORREO_ARGENTINO_BASE_URL = os.getenv(
+    "CORREO_ARGENTINO_BASE_URL",
+    "https://apitest.correoargentino.com.ar/micorreo/v1"
+    if CORREO_ARGENTINO_TEST_MODE
+    else "https://api.correoargentino.com.ar/micorreo/v1",
+)
+# Credenciales de acceso a la API (HTTP Basic para pedir el token) — distintas
+# del login web del panel de MiCorreo, hay que solicitarlas a Correo Argentino
+# para cada ambiente (test/productivo). Vacío = integración apagada (alta real,
+# sucursales y cotización en vivo quedan apagadas; la cotización sigue
+# funcionando vía la tabla estática de abajo).
+CORREO_ARGENTINO_USER = os.getenv("CORREO_ARGENTINO_USER", "")
+CORREO_ARGENTINO_PASSWORD = os.getenv("CORREO_ARGENTINO_PASSWORD", "")
+# Identificador de cliente de MiCorreo (ej. "0002005182", visible en el panel) —
+# va en el body/query de /agencies, /rates y /shipping/import.
+CORREO_ARGENTINO_CUSTOMER_ID = os.getenv("CORREO_ARGENTINO_CUSTOMER_ID", "")
+CORREO_ARGENTINO_PRODUCT_TYPE = os.getenv("CORREO_ARGENTINO_PRODUCT_TYPE", "CP")  # "Correo Argentino Clásico"
+CORREO_ARGENTINO_TIMEOUT = float(os.getenv("CORREO_ARGENTINO_TIMEOUT", "8"))
+
+# Datos del remitente — van en cada `/shipping/import` como `sender` (todos
+# opcionales según la doc, pero conviene completarlos) y `sender.originAddress`
+# (usado también como `postalCodeOrigin` de `/rates`: la cotización en vivo
+# siempre es desde esta sucursal/domicilio de origen hacia el CP del comprador).
+# Completar cuando el dueño confirme desde dónde despacha realmente.
+CORREO_ARGENTINO_SENDER_NAME = os.getenv("CORREO_ARGENTINO_SENDER_NAME", "")
+CORREO_ARGENTINO_SENDER_PHONE = os.getenv("CORREO_ARGENTINO_SENDER_PHONE", "")
+CORREO_ARGENTINO_SENDER_EMAIL = os.getenv("CORREO_ARGENTINO_SENDER_EMAIL", "")
+CORREO_ARGENTINO_SENDER_STREET = os.getenv("CORREO_ARGENTINO_SENDER_STREET", "")
+CORREO_ARGENTINO_SENDER_STREET_NUMBER = os.getenv("CORREO_ARGENTINO_SENDER_STREET_NUMBER", "")
+CORREO_ARGENTINO_SENDER_CITY = os.getenv("CORREO_ARGENTINO_SENDER_CITY", "")
+CORREO_ARGENTINO_SENDER_PROVINCE = os.getenv("CORREO_ARGENTINO_SENDER_PROVINCE", "")
+CORREO_ARGENTINO_SENDER_ZIP = os.getenv("CORREO_ARGENTINO_SENDER_ZIP", "")
+
+# Tarifario de respaldo (fallback) — se usa SOLO si no hay credenciales
+# cargadas, si falla la consulta en vivo a `POST /rates`, o si no se conoce
+# el código postal de destino. Tabla real "Encomienda Correo Clásica",
+# columna Nacional — tramos por peso facturable (hasta N kg → precio) +
+# cargo por Valor Declarado. Configurable sin tocar código si el tarifario
+# cambia.
+CORREO_ARGENTINO_TARIFF = json.loads(
+    os.getenv("CORREO_ARGENTINO_TARIFF_JSON", "")
+    or json.dumps({"1": 26400, "5": 32000, "10": 45200, "15": 56000, "20": 65800, "25": 80900})
+)
+# Cargo por Valor Declarado (se suma al precio de envío de respaldo, sobre el
+# subtotal del carrito): lista de brackets `[tope, cargo]` — `cargo` es un
+# monto fijo en $ o un string "N%" para un porcentaje del valor declarado.
+# Por defecto: $0,01 a $20.000 → $600 fijo; $20.000,01 a $200.000 → 3%; sin
+# tope documentado arriba de $200.000 → se sigue aplicando el último bracket
+# (3%) por defecto.
+CORREO_ARGENTINO_VALOR_DECLARADO = json.loads(
+    os.getenv("CORREO_ARGENTINO_VALOR_DECLARADO_JSON", "")
+    or json.dumps({"brackets": [[20000, 600], [200000, "3%"]]})
+)
+# Divisor de peso volumétrico usado SOLO por la tabla de respaldo de arriba
+# (la API real de Correo Argentino no pide peso volumétrico — toma peso real
+# en gramos + dimensiones en cm directo, ver /rates en la doc).
+SHIPPING_CORREO_ARGENTINO_VOLUMETRIC_DIVISOR = float(
+    os.getenv("SHIPPING_CORREO_ARGENTINO_VOLUMETRIC_DIVISOR", "6000")
 )
 
 INSTALLED_APPS = [

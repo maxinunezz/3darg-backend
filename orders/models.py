@@ -43,8 +43,42 @@ class Order(models.Model):
     # Método de envío elegido por el comprador en el selector del carrito
     # (ver `shipping/services/quote.py::select_methods()`). Vacío si se cayó
     # al fallback de "más barato" (sin selección explícita o CP no cotizado).
-    shipping_method = models.CharField(max_length=30, blank=True)  # "andreani" | "correoargentino" | ""
+    shipping_method = models.CharField(max_length=30, blank=True)  # "correoargentino" | "" (pedidos viejos pueden tener "andreani", histórico)
     shipping_modality = models.CharField(max_length=20, blank=True)  # "domicilio" | "sucursal" | ""
+
+    # Dirección del comprador, pedida en el checkout antes de pagar. La API
+    # real de Correo Argentino (API MiCorreo) NO exige lo mismo para las dos
+    # modalidades — ver CLAUDE.md backend, sección "Envíos": sucursal solo
+    # necesita `shipping_full_name`/`shipping_phone`/`shipping_province`/
+    # `shipping_agency_id` (la dirección completa no es obligatoria para esa
+    # modalidad); domicilio sí necesita la dirección completa (calle, altura,
+    # ciudad, provincia), sin `shipping_agency_id`.
+    shipping_full_name = models.CharField(max_length=150, blank=True)
+    shipping_phone = models.CharField(max_length=40, blank=True)
+    shipping_street = models.CharField(max_length=150, blank=True)
+    shipping_street_number = models.CharField(max_length=20, blank=True)
+    shipping_floor = models.CharField(max_length=20, blank=True)
+    shipping_department = models.CharField(max_length=20, blank=True)
+    shipping_city = models.CharField(max_length=100, blank=True)
+    shipping_province = models.CharField(max_length=2, blank=True)  # código AR_PROVINCES (ver shipping/services/postal.py)
+    shipping_agency_id = models.CharField(max_length=40, blank=True)
+
+    # Resultado del alta real en Correo Argentino (API MiCorreo,
+    # `POST /shipping/import`), disparada por `orders/signals.py` al
+    # confirmarse el pago — ver sección "Envíos" en CLAUDE.md. Vacíos si el
+    # pedido no es de Correo Argentino, si todavía no se confirmó el pago, o
+    # si el alta falló (ver `_sync_error`).
+    #
+    # OJO: a pesar del nombre, esto NO es un tracking number asignado por el
+    # correo — la respuesta real de `/shipping/import` no devuelve ninguno
+    # (solo `{"createdAt": ...}`). Este campo guarda nuestro propio
+    # `extOrderId` (= `external_reference`), que es el identificador que
+    # efectivamente tiene Correo Argentino del envío. Se mantiene el nombre
+    # del campo por compatibilidad (no se migra), pero no lo uses para
+    # buscar el envío en el panel de MiCorreo salvo que confirmes que ahí
+    # también se indexa por `extOrderId`.
+    correo_argentino_tracking_number = models.CharField(max_length=40, blank=True)
+    correo_argentino_sync_error = models.TextField(blank=True)
 
     items = models.JSONField(default=list, blank=True)
 
