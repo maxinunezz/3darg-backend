@@ -103,6 +103,7 @@ INSTALLED_APPS = [
     'contact',
     'vending',
     'wholesale',
+    'whatsapp_community',
     'mercadolibre',
     'shipping',
 ]
