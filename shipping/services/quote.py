@@ -159,7 +159,17 @@ def get_quotes(*, postal_code: str, items: list[tuple], declared_value: Decimal 
                 "is_fallback": False,
             })
         else:
-            price = float(tariff.correo_argentino_fallback_price(billable_weight_ca, declared_value))
+            # Tarifa fija TEMPORAL (ver settings.SHIPPING_TEMP_FIXED_RATES):
+            # mientras no tengamos credenciales reales de Correo Argentino,
+            # el dueño pidió cobrar un monto fijo por modalidad en vez del
+            # cálculo de la tabla de respaldo. Si no hay override para esta
+            # modalidad (dict vacío o sin esa key), se cae al cálculo de
+            # siempre.
+            fixed_price = settings.SHIPPING_TEMP_FIXED_RATES.get(modality)
+            if fixed_price is not None:
+                price = float(fixed_price)
+            else:
+                price = float(tariff.correo_argentino_fallback_price(billable_weight_ca, declared_value))
             quotes.append({
                 "carrier": "Correo Argentino",
                 "service": settings.CORREO_ARGENTINO_PRODUCT_TYPE,

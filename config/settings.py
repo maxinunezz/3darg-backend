@@ -145,6 +145,22 @@ SHIPPING_CORREO_ARGENTINO_VOLUMETRIC_DIVISOR = float(
     os.getenv("SHIPPING_CORREO_ARGENTINO_VOLUMETRIC_DIVISOR", "6000")
 )
 
+# --- Tarifa plana TEMPORAL por modalidad (decisión explícita del dueño,
+# 2026-10-17) — mientras Correo Argentino no entregue las credenciales
+# reales de API, se cobra un monto fijo por modalidad en vez de calcular la
+# tabla de respaldo (`CORREO_ARGENTINO_TARIFF`/`_valor_declarado_surcharge`),
+# que daba montos que no reflejaban bien el costo real. Ver
+# `quote.py::get_quotes()`: si el modality tiene entrada acá, se usa este
+# precio fijo en el camino de fallback, sin tocar el camino de cotización en
+# vivo. Vacío ({}) = sin override, se vuelve al cálculo de `tariff.py` de
+# toda la vida. SACAR (o vaciar el JSON) cuando lleguen las credenciales
+# reales de Correo Argentino y se confirme que la cotización en vivo da
+# precios razonables.
+SHIPPING_TEMP_FIXED_RATES = json.loads(
+    os.getenv("SHIPPING_TEMP_FIXED_RATES_JSON", "")
+    or json.dumps({"sucursal": 5850, "domicilio": 7100})
+)
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
