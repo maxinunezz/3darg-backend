@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from rest_framework import serializers
-from products.serializers import ProductSerializer
+from products.serializers import ProductSerializer, ProductVariantSerializer
 from products.services.combo_pricing import compute_unit_prices
 from .models import Cart, CartItem
 from .services.cart_discount import compute_cart_pricing
@@ -9,6 +9,7 @@ from .services.cart_discount import compute_cart_pricing
 
 class CartItemSerializer(serializers.ModelSerializer):
     product = ProductSerializer(read_only=True)
+    variant = ProductVariantSerializer(read_only=True)
     # Precio unitario y subtotal con descuento de socio + descuento por
     # cantidad total de unidades del carrito ya aplicados (mismo % en
     # todas las líneas, ver `Brand.cart_discount_config`). Depende de la
@@ -22,7 +23,7 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CartItem
-        fields = ["id", "product", "quantity", "unit_price", "subtotal"]
+        fields = ["id", "product", "variant", "quantity", "unit_price", "subtotal"]
 
     def _unit_price(self, obj):
         cache = self.context.get("_cart_unit_prices")
@@ -33,6 +34,8 @@ class CartItemSerializer(serializers.ModelSerializer):
         # lista/socio sin el descuento por cantidad del carrito.
         request = self.context.get("request")
         user = getattr(request, "user", None)
+        if obj.variant_id:
+            return obj.variant.price_for(user)
         return obj.product.price_for(user)
 
     def get_unit_price(self, obj):
@@ -65,8 +68,12 @@ class CartSerializer(serializers.ModelSerializer):
         # abajo, sin recalcular ni duplicar la lógica de descuento.
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        cart_items = list(instance.items.select_related("product__category").all())
-        list_prices = compute_unit_prices(user, [(ci.product, ci.quantity) for ci in cart_items])
+        cart_items = list(
+            instance.items.select_related("product__category", "variant").all()
+        )
+        list_prices = compute_unit_prices(
+            user, [(ci.product, ci.quantity, ci.variant) for ci in cart_items]
+        )
         lines = [(price, ci.quantity) for ci, price in zip(cart_items, list_prices)]
         pricing = compute_cart_pricing(instance.brand, lines)
         self.context["_cart_pricing"] = pricing
@@ -84,7 +91,11 @@ class CartSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         lines = [
-            (item.product.price_for(user), item.quantity) for item in obj.items.all()
+            (
+                item.variant.price_for(user) if item.variant_id else item.product.price_for(user),
+                item.quantity,
+            )
+            for item in obj.items.all()
         ]
         return compute_cart_pricing(obj.brand, lines)
 
@@ -106,6 +117,10 @@ class CartSerializer(serializers.ModelSerializer):
 
 class AddToCartSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
+    # Opcional: solo se manda si el producto tiene talles/variantes reales
+    # cargadas (ver `ProductSerializer.variants`). `None`/ausente = producto
+    # sin variantes, comportamiento histórico.
+    variant_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(min_value=1, default=1)
     # Obligatorio: cada carrito pertenece a una única marca (ver cart/models.py).
     brand_slug = serializers.CharField()
@@ -113,6 +128,7 @@ class AddToCartSerializer(serializers.Serializer):
 
 class CartQuoteItemSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
+    variant_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(min_value=1)
 
 

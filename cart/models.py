@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.db import models
-from products.models import Product
+from products.models import Product, ProductVariant
 from brands.models import Brand
 
 
@@ -33,13 +33,42 @@ class Cart(models.Model):
 class CartItem(models.Model):
     cart = models.ForeignKey(Cart, related_name="items", on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    # Talle/variante elegida (Fase 2 de ProductVariant) — null = producto sin
+    # variantes reales (comportamiento histórico, usa el precio/stock del
+    # Product). Dos variantes distintas del mismo producto son líneas
+    # separadas del carrito (ver unique_together abajo).
+    variant = models.ForeignKey(
+        ProductVariant,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="cart_items",
+    )
     quantity = models.PositiveIntegerField(default=1)
 
     class Meta:
-        unique_together = ("cart", "product")
+        # No se puede usar unique_together("cart", "product", "variant") a
+        # secas: Postgres trata cada NULL como distinto de otro NULL, así
+        # que esa constraint no evitaría dos filas (cart, product, NULL)
+        # duplicadas para un producto sin variantes reales. Dos constraints
+        # condicionales cubren los dos casos sin ese agujero.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cart", "product", "variant"],
+                condition=models.Q(variant__isnull=False),
+                name="cart_item_unico_por_variante",
+            ),
+            models.UniqueConstraint(
+                fields=["cart", "product"],
+                condition=models.Q(variant__isnull=True),
+                name="cart_item_unico_sin_variante",
+            ),
+        ]
 
     def subtotal(self):
-        return self.product.price * self.quantity
+        price = self.variant.price if self.variant_id else self.product.price
+        return price * self.quantity
 
     def __str__(self):
-        return f"{self.quantity}x {self.product.name}"
+        talle = f" ({self.variant})" if self.variant_id else ""
+        return f"{self.quantity}x {self.product.name}{talle}"

@@ -105,6 +105,22 @@ class OrderItem(models.Model):
         blank=True,
         on_delete=models.SET_NULL,
     )
+    # Talle/variante comprada (Fase 2 de ProductVariant) — null = producto
+    # sin variantes reales al momento de la compra. `SET_NULL` porque una
+    # variante se puede borrar del catálogo sin que eso invalide un pedido
+    # ya hecho (igual criterio que `product` arriba).
+    variant = models.ForeignKey(
+        "products.ProductVariant",
+        related_name="order_items",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
+    # Snapshot del talle al momento de la compra (ej. "Mediano (5cm)"), para
+    # que el historial de pedidos siga mostrando qué talle se compró aunque
+    # la variante se borre o se renombre después — mismo criterio que
+    # `product_name` abajo.
+    variant_label = models.CharField(max_length=100, blank=True)
     product_name = models.CharField(max_length=200)
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)

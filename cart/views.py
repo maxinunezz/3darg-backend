@@ -7,7 +7,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
 from django.shortcuts import get_object_or_404
 
-from products.models import Product
+from products.models import Product, ProductVariant
 from products.services.combo_pricing import compute_unit_prices
 from brands.models import Brand
 from .models import Cart, CartItem
@@ -86,9 +86,16 @@ class CartItemAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        variant = None
+        variant_id = data.get("variant_id")
+        if variant_id is not None:
+            variant = get_object_or_404(
+                ProductVariant, id=variant_id, product=product, is_available=True
+            )
+
         cart = get_or_create_cart(request.user, brand)
 
-        item, created = CartItem.objects.get_or_create(cart=cart, product=product)
+        item, created = CartItem.objects.get_or_create(cart=cart, product=product, variant=variant)
         if not created:
             item.quantity += data["quantity"]
         else:
@@ -156,8 +163,18 @@ class CartQuoteAPIView(APIView):
         # Los product_id que ya no matcheen (ej. se pausó desde que se agregó
         # al carrito de invitado) se omiten: es un preview de precio, no una
         # mutación — el checkout real vuelve a validar disponibilidad/stock.
+        variant_ids = [it["variant_id"] for it in items_data if it.get("variant_id")]
+        variants_by_id = {
+            v.id: v
+            for v in ProductVariant.objects.filter(id__in=variant_ids, is_available=True)
+        }
+
         valid_items = [
-            (products_by_id[it["product_id"]], it["quantity"])
+            (
+                products_by_id[it["product_id"]],
+                it["quantity"],
+                variants_by_id.get(it.get("variant_id")),
+            )
             for it in items_data
             if it["product_id"] in products_by_id
         ]
@@ -166,7 +183,7 @@ class CartQuoteAPIView(APIView):
         list_prices = compute_unit_prices(user, valid_items)
         lines = [
             (price, quantity)
-            for (_product, quantity), price in zip(valid_items, list_prices)
+            for (_product, quantity, _variant), price in zip(valid_items, list_prices)
         ]
         pricing = compute_cart_pricing(brand, lines)
 
@@ -176,8 +193,9 @@ class CartQuoteAPIView(APIView):
                 "quantity": quantity,
                 "unit_price": discounted_unit_price,
                 "subtotal": discounted_unit_price * quantity,
+                "variant_id": variant.id if variant else None,
             }
-            for (product, quantity), discounted_unit_price in zip(
+            for (product, quantity, variant), discounted_unit_price in zip(
                 valid_items, pricing["discounted_unit_prices"]
             )
         ]

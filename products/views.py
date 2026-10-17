@@ -40,7 +40,7 @@ class ProductListAPIView(generics.ListAPIView):
         qs = (
             Product.objects.visible_to(self.request.user)
             .filter(is_available=True, is_available_web=True)
-            .prefetch_related(WEB_IMAGES_PREFETCH)
+            .prefetch_related(WEB_IMAGES_PREFETCH, "variants")
             .select_related("category", "brand")
         )
         brand_slug = self.request.query_params.get("brand_slug")
@@ -78,7 +78,7 @@ class ProductDetailAPIView(generics.RetrieveAPIView):
         return (
             Product.objects.visible_to(self.request.user)
             .filter(is_available=True, is_available_web=True)
-            .prefetch_related(WEB_IMAGES_PREFETCH)
+            .prefetch_related(WEB_IMAGES_PREFETCH, "variants")
             .select_related("category", "brand")
         )
 

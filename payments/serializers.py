@@ -3,6 +3,9 @@ from rest_framework import serializers
 
 class CheckoutItemSerializer(serializers.Serializer):
     product_id = serializers.IntegerField(min_value=1)
+    # Opcional: solo viene si el producto tiene talles/variantes reales
+    # cargadas (ver `ProductSerializer.variants`).
+    variant_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
     quantity = serializers.IntegerField(min_value=1, max_value=999)
 
 

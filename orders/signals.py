@@ -11,7 +11,7 @@ from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
 from brands.services.meta_conversions import hash_user_data, send_event as send_meta_event
-from products.models import Product
+from products.models import Product, ProductVariant
 from shipping.services import correo_argentino
 from shipping.services.correo_argentino import CorreoArgentinoConfigError, CorreoArgentinoError
 from .models import Order
@@ -62,8 +62,22 @@ def handle_order_status_change(sender, instance, created, **kwargs):
 
 
 def _decrement_stock(order):
+    # Talles/variantes (Fase 2 de ProductVariant): si el item se compró con
+    # una variante puntual, el stock que se mueve es el de ESA variante, no
+    # el del Product (que puede tener otras variantes con su propio stock
+    # intacto). Sin variante (producto sin talles), comportamiento histórico.
     with transaction.atomic():
         for item in order.order_items.all():
+            if item.variant_id:
+                variant = ProductVariant.objects.select_for_update().get(pk=item.variant_id)
+                new_stock = max(variant.stock - item.quantity, 0)
+                variant.stock = new_stock
+                variant.save(update_fields=["stock"])
+                logger.info(
+                    "Stock descontado: variant=%s qty=-%s stock_actual=%s",
+                    variant.sku or variant.pk, item.quantity, new_stock,
+                )
+                continue
             if not item.product_id:
                 continue
             product = Product.objects.select_for_update().get(pk=item.product_id)
@@ -79,6 +93,15 @@ def _decrement_stock(order):
 def _restore_stock(order):
     with transaction.atomic():
         for item in order.order_items.all():
+            if item.variant_id:
+                variant = ProductVariant.objects.select_for_update().get(pk=item.variant_id)
+                variant.stock = variant.stock + item.quantity
+                variant.save(update_fields=["stock"])
+                logger.info(
+                    "Stock restituido: variant=%s qty=+%s stock_actual=%s",
+                    variant.sku or variant.pk, item.quantity, variant.stock,
+                )
+                continue
             if not item.product_id:
                 continue
             product = Product.objects.select_for_update().get(pk=item.product_id)

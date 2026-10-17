@@ -8,6 +8,7 @@ from django.forms.models import BaseInlineFormSet, ModelChoiceIterator
 from django.shortcuts import render
 from django.urls import reverse
 from django.utils.html import format_html, format_html_join
+from django.utils.safestring import mark_safe
 from .models import (
     Product, Category, ProductImage, CostTemplate, ProductVariant, ProductoEnMercadoLibre,
 )
@@ -245,20 +246,22 @@ class AsignarCostTemplateForm(forms.Form):
 
 @admin.register(ProductVariant)
 class ProductVariantAdmin(admin.ModelAdmin):
-    """Variantes de catálogo. Fase 1: hay exactamente una por `Product`
-    (migración `0035_migrar_productos_a_variantes_y_costtemplate`) y nada del
-    checkout/Mercado Libre/el feed la lee todavía — pero ya se puede usar este
-    admin para ir vinculando variantes a un `CostTemplate` compartido, que es
-    justamente lo que necesita el sync de presupuestos3d para encontrar a
-    quién aplicarle el precio.
+    """Variantes de catálogo. Fase 2: un `Product` puede tener varias (ej.
+    Chico/Mediano/Grande, cada una con su propio precio/stock) — el
+    selector de "Talle" del frontend se muestra solo si el producto tiene
+    más de una. `order` controla el orden de aparición en ese selector (no
+    alfabético: Chico/Mediano/Grande no ordena bien como texto). Este admin
+    también sirve para ir vinculando variantes a un `CostTemplate`
+    compartido, que es lo que necesita el sync de presupuestos3d para
+    encontrar a quién aplicarle el precio.
     """
 
     list_display = [
-        "__str__", "product", "sku", "price", "stock", "cost_template", "is_available",
+        "__str__", "product", "order", "sku", "price", "stock", "cost_template", "is_available",
     ]
     list_filter = ["cost_template", "is_available", "product__brand"]
     search_fields = ["sku", "product__name", "product__sku", "color", "size"]
-    list_editable = ["price", "stock", "is_available"]
+    list_editable = ["order", "price", "stock", "is_available"]
     autocomplete_fields = ["product", "cost_template"]
     actions = ["asignar_cost_template"]
 
@@ -439,29 +442,43 @@ class ProductAdmin(admin.ModelAdmin):
     def web_resumen(self, obj):
         return self._channel_resumen(obj, "web", "Página web")
 
-    @admin.display(description="Variante / template de costo")
+    @admin.display(description="Variante(s) / template de costo")
     def variante_resumen(self, obj):
-        """Fase 1: cada Product tiene exactamente una ProductVariant (ver
-        migración 0035). Este resumen es solo un atajo de navegación hacia
-        el admin de ProductVariant — el precio/stock que de verdad se usa
-        hoy en el carrito/ML/el feed sigue siendo el de este Product de
-        acá arriba, no el de la variante (eso cambia en una fase siguiente).
+        """Atajo de navegación hacia el/los `ProductVariant` de este
+        producto.
+
+        Con UNA sola variante (caso Fase 1, el default para un producto sin
+        talles): el precio/stock que de verdad se usa en el carrito/ML/el
+        feed sigue siendo el de `Product` de acá arriba, la variante es solo
+        el anclaje para presupuestos3d.
+
+        Con MÁS DE UNA (Fase 2, ej. Chico/Mediano/Grande cargados desde el
+        admin de `ProductVariant` — no hay inline acá a propósito, para no
+        sumar complejidad al formset de fotos): cada variante tiene su
+        propio precio/stock real, que es lo que se cobra/descuenta — el
+        `Product.price` de este form queda sin uso para ese caso.
         """
         if not obj or not obj.pk:
-            return "Guardá el producto primero para ver su variante."
-        variant = obj.variants.first()
-        if not variant:
-            return "Sin variante todavía (debería tener una, ver migración 0035)."
-        url = reverse("admin:products_productvariant_change", args=[variant.pk])
-        if variant.cost_template:
-            template_url = reverse("admin:products_costtemplate_change", args=[variant.cost_template.pk])
-            detalle = format_html(
-                'template <a href="{}">{}</a>',
-                template_url, variant.cost_template.nombre,
-            )
-        else:
-            detalle = "sin template — precio propio"
-        return format_html('<a href="{}">{}</a> — {}', url, str(variant), detalle)
+            return "Guardá el producto primero para ver sus variantes."
+        variants = list(obj.variants.all())
+        if not variants:
+            return "Sin variantes todavía (cargalas desde el admin de ProductVariant)."
+
+        def _link(variant):
+            url = reverse("admin:products_productvariant_change", args=[variant.pk])
+            if variant.cost_template:
+                template_url = reverse("admin:products_costtemplate_change", args=[variant.cost_template.pk])
+                detalle = format_html(
+                    'template <a href="{}">{}</a>',
+                    template_url, variant.cost_template.nombre,
+                )
+            else:
+                detalle = f"${variant.price:.2f} propio"
+            return format_html('<a href="{}">{}</a> — {}', url, str(variant), detalle)
+
+        if len(variants) == 1:
+            return _link(variants[0])
+        return format_html_join(mark_safe("<br>"), "{}", ((_link(v),) for v in variants))
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         field = super().formfield_for_foreignkey(db_field, request, **kwargs)

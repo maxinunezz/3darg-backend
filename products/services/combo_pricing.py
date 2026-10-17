@@ -14,12 +14,32 @@ comprar más desde el carrito (antes se elegía desde la ficha de producto).
 mantiene como punto único de entrada para no tocar los tres lugares que la
 importan (`cart/serializers.py`, `cart/views.py::CartQuoteAPIView`,
 `payments/views.py`).
+
+**Variantes (Fase 2 de `ProductVariant`)**: cada línea puede venir como
+`(product, quantity)` (sin variante, comportamiento histórico) o
+`(product, quantity, variant)`, donde `variant` es una `ProductVariant` ya
+cargada o `None`. Si hay variante, el precio es el de la variante
+(`variant.price_for(user)`, que aplica el mismo `member_discount_percent`
+del producto pero sobre el precio PROPIO de la variante) — si no, cae al
+precio del producto como siempre.
 """
 
 
 def compute_unit_prices(user, items):
-    """`items`: lista de `(product, quantity)`. Devuelve una lista de
-    `Decimal` (precio de lista/socio, sin descuento por volumen — ver
-    docstring del módulo), en el MISMO orden que `items`.
+    """`items`: lista de `(product, quantity)` o `(product, quantity,
+    variant)` (`variant` puede ser `None`). Devuelve una lista de `Decimal`
+    (precio de lista/socio, sin descuento por volumen — ver docstring del
+    módulo), en el MISMO orden que `items`.
     """
-    return [product.price_for(user) for product, _quantity in items]
+    prices = []
+    for item in items:
+        if len(item) == 3:
+            product, _quantity, variant = item
+        else:
+            product, _quantity = item
+            variant = None
+        if variant is not None:
+            prices.append(variant.price_for(user))
+        else:
+            prices.append(product.price_for(user))
+    return prices

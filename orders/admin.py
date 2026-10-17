@@ -11,8 +11,8 @@ from .signals import _create_correo_argentino_shipment
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 0
-    readonly_fields = ("product", "product_name", "quantity", "unit_price", "subtotal")
-    fields = ("product", "product_name", "quantity", "unit_price", "subtotal")
+    readonly_fields = ("product", "product_name", "variant", "variant_label", "quantity", "unit_price", "subtotal")
+    fields = ("product", "product_name", "variant", "variant_label", "quantity", "unit_price", "subtotal")
 
     def subtotal(self, obj):
         return obj.subtotal
@@ -154,5 +154,5 @@ class OrderAdmin(admin.ModelAdmin):
 
 @admin.register(OrderItem)
 class OrderItemAdmin(admin.ModelAdmin):
-    list_display = ("id", "order", "product_name", "quantity", "unit_price")
+    list_display = ("id", "order", "product_name", "variant_label", "quantity", "unit_price")
     search_fields = ("product_name", "order__external_reference")

@@ -895,13 +895,19 @@ class ProductVariant(models.Model):
     fotos, publicación en Mercado Libre/feed. `ProductVariant` es el
     tamaño/color puntual que se vende, con su propio precio/stock/SKU.
 
-    Fase 1: cada `Product` existente tiene EXACTAMENTE una variante
-    (migración 1:1, ver `0034_crear_productvariant_y_costtemplate.py`) — por
-    ahora nada del resto del sistema (cart, orders, Mercado Libre, el feed)
-    lee este modelo todavía, así que crearlo no cambia ningún comportamiento
-    actual. Las fases siguientes conectan ML/feed/cart/checkout a este
-    modelo y recién ahí un mismo `Product` puede tener variantes reales de
-    color/tamaño con stock propio.
+    Fase 1 (migración `0034_crear_productvariant_y_costtemplate.py`): cada
+    `Product` tenía EXACTAMENTE una variante y nada del resto del sistema la
+    leía — era solo el anclaje para que el sync de costeo de presupuestos3d
+    tuviera dónde vincularse.
+
+    Fase 2 (actual): `cart`/`orders`/`payments` SÍ leen `ProductVariant`
+    cuando un producto tiene más de una — un mismo `Product` (el diseño,
+    ej. "Molde de torta Unicornio") puede tener varias `ProductVariant` de
+    `size` (ej. Chico/Mediano/Grande), cada una con su propio precio y
+    stock. Si un producto sigue teniendo una sola variante, todo sigue
+    funcionando igual que en Fase 1 (no es obligatorio migrar todo el
+    catálogo de una). El selector de "Talle" del frontend solo se muestra
+    si `product.variants` tiene más de una entrada.
     """
 
     product = models.ForeignKey(
@@ -911,6 +917,15 @@ class ProductVariant(models.Model):
     )
     color = models.CharField(max_length=50, blank=True)
     size = models.CharField("Tamaño", max_length=50, blank=True)
+    order = models.PositiveIntegerField(
+        "Orden",
+        default=0,
+        help_text=(
+            "Orden de aparición entre las variantes de este producto (ej: "
+            "Chico=1, Mediano=2, Grande=3) — el alfabético no sirve para "
+            "una progresión de tamaños. No afecta nada más."
+        ),
+    )
     sku = models.CharField(max_length=64, unique=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.PositiveIntegerField(default=0)
@@ -945,7 +960,7 @@ class ProductVariant(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["product", "color", "size"]
+        ordering = ["product", "order", "color", "size"]
         constraints = [
             models.UniqueConstraint(
                 fields=["product", "color", "size"],
@@ -956,8 +971,40 @@ class ProductVariant(models.Model):
         verbose_name_plural = "Variantes de producto"
 
     def __str__(self):
-        etiqueta = " / ".join(filter(None, [self.color, self.size])) or "única"
-        return f"{self.product.name} ({etiqueta})"
+        return f"{self.product.name} ({self.label})"
+
+    @property
+    def label(self) -> str:
+        """Etiqueta corta de esta variante (ej. "Mediano / Rojo"), para
+        mostrar en el selector de Talle, el carrito, el checkout y el
+        historial de pedidos — un solo lugar para no repetir el `" / "
+        .join(...)` en cada consumidor."""
+        return " / ".join(filter(None, [self.size, self.color])) or "única"
+
+    @property
+    def has_member_discount(self) -> bool:
+        """Usa el % de descuento de socio del `Product` (no hay uno propio
+        por variante) — el incentivo de socios es por producto, el talle
+        solo cambia precio/stock base."""
+        return self.product.member_discount_percent > 0
+
+    @property
+    def member_price(self) -> Decimal:
+        """Precio con el descuento de socio del `Product` aplicado sobre el
+        precio PROPIO de esta variante (mismo cálculo que
+        `Product.member_price`, pero sobre `self.price`)."""
+        if not self.has_member_discount:
+            return self.price
+        factor = (Decimal(100) - Decimal(self.product.member_discount_percent)) / Decimal(100)
+        return (self.price * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def price_for(self, user) -> Decimal:
+        """Precio efectivo que paga `user` por ESTA variante — mismo
+        criterio que `Product.price_for()` (socio = `member_price`, anónimo
+        = `price`), pero resuelto sobre el precio propio de la variante."""
+        if user and getattr(user, "is_authenticated", False):
+            return self.member_price
+        return self.price
 
     def save(self, *args, **kwargs):
         """Si la variante está vinculada a un `CostTemplate`, hereda de ahí
@@ -984,6 +1031,15 @@ class ProductVariant(models.Model):
         muchas variantes a la vez, no pasan por este `save()` uno por uno) —
         esta lógica cubre el resto de los casos, que antes no tenían ninguna
         garantía.
+
+        OJO Fase 2: este espejo a `Product` solo tiene sentido mientras el
+        producto tenga EXACTAMENTE una variante (el caso Fase 1, donde
+        `Product.price`/medidas siguen siendo la fuente de verdad para
+        cart/checkout de un producto sin talles). Si el producto ya tiene
+        más de una `ProductVariant` (ej: Chico/Mediano/Grande), cada talle
+        tiene su propio precio real — pisar `Product` con el de "la última
+        variante que se guardó" sería arbitrario y rompería el precio que
+        ven las otras variantes, así que el espejo se omite en ese caso.
         """
         update_kwargs = {}
         if self.cost_template_id:
@@ -1000,7 +1056,7 @@ class ProductVariant(models.Model):
                 self.size = template.size_label
                 update_kwargs["size"] = template.size_label
         super().save(*args, **kwargs)
-        if update_kwargs:
+        if update_kwargs and ProductVariant.objects.filter(product_id=self.product_id).count() <= 1:
             Product.objects.filter(pk=self.product_id).update(**update_kwargs)
 
 

@@ -13,7 +13,7 @@ from django.shortcuts import get_object_or_404
 
 from brands.models import Brand
 from orders.models import Order, OrderItem
-from products.models import Product
+from products.models import Product, ProductVariant
 from products.services.combo_pricing import compute_unit_prices
 from cart.services.cart_discount import compute_cart_pricing
 from shipping.services.quote import cheapest_price, get_quotes, select_methods
@@ -64,6 +64,31 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Talles/variantes (Fase 2 de ProductVariant): se resuelven todas
+        # juntas, validando que cada `variant_id` pertenezca al producto que
+        # dice acompañar y esté activa — mismo criterio que `cart/views.py`.
+        variant_ids = [it["variant_id"] for it in items_data if it.get("variant_id")]
+        variants_by_id = {
+            v.id: v
+            for v in ProductVariant.objects.filter(
+                id__in=variant_ids, product_id__in=product_ids, is_available=True
+            )
+        }
+        missing_variants = [
+            it["variant_id"] for it in items_data
+            if it.get("variant_id") and it["variant_id"] not in variants_by_id
+        ]
+        if missing_variants:
+            return Response(
+                {"detail": f"Talle(s) no disponible(s): {missing_variants}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        variants_for_item = {
+            it["product_id"]: variants_by_id.get(it["variant_id"])
+            for it in items_data
+            if it.get("variant_id")
+        }
+
         # Los productos members_only solo pueden comprarlos usuarios con cuenta.
         members_only = [p.name for p in products_by_id.values() if p.members_only]
         if members_only and user is None:
@@ -75,9 +100,12 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         stock_errors = []
         for it in items_data:
             product = products_by_id[it["product_id"]]
-            if product.stock < it["quantity"]:
+            variant = variants_by_id.get(it.get("variant_id"))
+            available_stock = variant.stock if variant is not None else product.stock
+            if available_stock < it["quantity"]:
+                label = f"{product.name} ({variant.label})" if variant is not None else product.name
                 stock_errors.append(
-                    f"'{product.name}': stock insuficiente ({product.stock} disponible(s))"
+                    f"'{label}': stock insuficiente ({available_stock} disponible(s))"
                 )
         if stock_errors:
             return Response(
@@ -92,10 +120,18 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         # línea por línea. Mismo mecanismo
         # que usa el cart (`cart/serializers.py`/`CartQuoteAPIView`), para
         # que el precio cobrado en checkout sea exactamente el que se vio en
-        # el carrito.
+        # el carrito. Si el item trae `variant_id`, el precio sale de la
+        # variante (talle), no del producto.
         list_prices = compute_unit_prices(
             user,
-            [(products_by_id[it["product_id"]], it["quantity"]) for it in items_data],
+            [
+                (
+                    products_by_id[it["product_id"]],
+                    it["quantity"],
+                    variants_by_id.get(it.get("variant_id")),
+                )
+                for it in items_data
+            ],
         )
         lines = [
             (price, it["quantity"]) for it, price in zip(items_data, list_prices)
@@ -106,9 +142,11 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         items_for_mp = []
         for it, unit_price in zip(items_data, unit_prices):
             product = products_by_id[it["product_id"]]
+            variant = variants_by_id.get(it.get("variant_id"))
             qty = it["quantity"]
+            title = f"{product.name} ({variant.label})" if variant is not None else product.name
             items_for_mp.append({
-                "title": product.name,
+                "title": title,
                 "quantity": qty,
                 "unit_price": float(unit_price),
             })
@@ -244,6 +282,12 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 order=order,
                 product=products_by_id[it["product_id"]],
                 product_name=products_by_id[it["product_id"]].name,
+                variant=variants_by_id.get(it.get("variant_id")),
+                variant_label=(
+                    variants_by_id[it["variant_id"]].label
+                    if it.get("variant_id") in variants_by_id
+                    else ""
+                ),
                 quantity=it["quantity"],
                 unit_price=unit_price,
             )
