@@ -98,20 +98,26 @@ class Brand(models.Model):
         ),
     )
 
-    # Configuración de envío por marca — hoy solo el umbral de envío gratis.
-    # Clave esperada: `free_shipping_threshold` (número, en la moneda de la
-    # marca — ARS). Vacío/sin la clave = sin envío gratis, el comprador
-    # siempre paga el costo de envío cotizado (mismo criterio "vacío =
-    # apagado" que `meta_config`/`page_config`). Se resuelve contra el
-    # SUBTOTAL del pedido (antes de sumar el envío), ver
+    # Configuración de envío por marca — umbral de envío gratis, separado por
+    # MODALIDAD (sucursal vs domicilio, cada una con su propio costo real de
+    # Correo Argentino — no tiene sentido un único umbral para las dos).
+    # Claves esperadas: `free_shipping_threshold_sucursal` /
+    # `free_shipping_threshold_domicilio` (número, en la moneda de la marca —
+    # ARS). Vacío/sin la clave = sin envío gratis para esa modalidad, el
+    # comprador siempre paga el costo de envío cotizado (mismo criterio
+    # "vacío = apagado" que `meta_config`/`page_config`). Se resuelve contra
+    # el SUBTOTAL del pedido (antes de sumar el envío), ver
     # `payments/views.py::MercadoPagoCheckoutProCreateAPIView`.
+    # (Forma vieja, ya migrada: `free_shipping_threshold` único — ver
+    # `brands/migrations/0009_free_shipping_threshold_por_modalidad.py`.)
     shipping_config = models.JSONField(
         default=dict,
         blank=True,
         help_text=(
-            "Configuración de envío por marca. Clave disponible: "
-            "free_shipping_threshold (monto a partir del cual el envío es "
-            "gratis; vacío o 0 = sin envío gratis)."
+            "Configuración de envío por marca. Claves disponibles: "
+            "free_shipping_threshold_sucursal / free_shipping_threshold_domicilio "
+            "(monto a partir del cual el envío de esa modalidad es gratis; "
+            "vacío o 0 = sin envío gratis para esa modalidad)."
         ),
     )
 

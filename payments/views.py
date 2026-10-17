@@ -156,15 +156,25 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         subtotal = pricing["total"]
 
         # Costo de envío: se cobra siempre, salvo que la marca tenga un
-        # umbral de envío gratis (`Brand.shipping_config.free_shipping_threshold`)
-        # y el subtotal lo alcance. Mismo mecanismo de cotización
+        # umbral de envío gratis para la modalidad elegida
+        # (`Brand.shipping_config.free_shipping_threshold_sucursal` /
+        # `_domicilio` — separados porque cada modalidad tiene un costo real
+        # distinto, no tiene sentido un único umbral para las dos) y el
+        # subtotal lo alcance. Mismo mecanismo de cotización
         # (`shipping.services.quote`) que usa el preview del carrito
         # (`/api/shipping/calculate/`), para que lo que se cobra acá sea
         # consistente con lo que se mostró antes de pagar.
-        free_shipping_threshold = (brand.shipping_config or {}).get("free_shipping_threshold")
         postal_code = (data.get("postal_code") or "").strip()
         province = (data.get("province") or "").strip()
         shipping_method_id = (data.get("shipping_method_id") or "").strip()
+        # Se necesita la modalidad ANTES de saber si hay envío gratis (cada
+        # una tiene su propio umbral) — mismo `partition("_")` que se usa
+        # más abajo para derivar `shipping_method`/`shipping_modality` del
+        # método finalmente cobrado.
+        _, _, requested_modality = shipping_method_id.partition("_")
+        free_shipping_threshold = (brand.shipping_config or {}).get(
+            f"free_shipping_threshold_{requested_modality}"
+        ) if requested_modality in ("sucursal", "domicilio") else None
         shipping_cost = Decimal("0")
         shipping_method = ""
         shipping_modality = ""

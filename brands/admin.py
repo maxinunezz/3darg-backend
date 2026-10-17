@@ -64,6 +64,21 @@ class BrandAdmin(admin.ModelAdmin):
             "fields": ("page_config",),
             "classes": ("collapse",),
         }),
+        ("Envío y Descuentos (JSON)", {
+            "description": (
+                "shipping_config — claves: free_shipping_threshold_sucursal / "
+                "free_shipping_threshold_domicilio (monto del subtotal a partir del cual el "
+                "envío de esa modalidad es gratis; vacío o 0 = sin envío gratis para esa "
+                "modalidad). Ej: {\"free_shipping_threshold_sucursal\": 100000, "
+                "\"free_shipping_threshold_domicilio\": 120000}.<br><br>"
+                "cart_discount_config — lista de tramos de descuento por CANTIDAD TOTAL de "
+                "unidades del carrito (no por monto). Ej: [{\"min_quantity\": 5, "
+                "\"discount_percent\": 5}, {\"min_quantity\": 10, \"discount_percent\": 10}]. "
+                "Vacío = sin descuento."
+            ),
+            "fields": ("shipping_config", "cart_discount_config"),
+            "classes": ("collapse",),
+        }),
         ("Integración Meta Business (JSON)", {
             "description": (
                 "Claves: pixel_id (Meta Pixel de esta marca), catalog_id (Commerce Manager), "
