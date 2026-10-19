@@ -2,6 +2,8 @@ import re
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
+from django.utils.http import urlsafe_base64_decode
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from rest_framework import serializers
@@ -113,11 +115,99 @@ class GoogleAuthSerializer(serializers.Serializer):
 
 class UserSerializer(serializers.ModelSerializer):
     registered_brand = serializers.SlugRelatedField(slug_field="slug", read_only=True)
+    has_usable_password = serializers.SerializerMethodField()
+    # Solo se pide para confirmar un cambio de email (ver validate()). No es un campo del modelo.
+    current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = User
-        fields = ["id", "email", "username", "phone", "registered_brand", "date_joined"]
-        read_only_fields = ["id", "registered_brand", "date_joined"]
+        fields = [
+            "id", "email", "username", "first_name", "last_name", "phone",
+            "registered_brand", "date_joined", "has_usable_password", "current_password",
+        ]
+        read_only_fields = ["id", "registered_brand", "date_joined", "has_usable_password"]
+
+    def get_has_usable_password(self, obj):
+        return obj.has_usable_password()
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value).exclude(pk=self.instance.pk).exists():
+            raise serializers.ValidationError("Ya existe una cuenta con ese email.")
+        return value
+
+    def validate(self, attrs):
+        new_email = attrs.get("email")
+        if new_email and new_email != self.instance.email:
+            # Las cuentas de Google sin password usable no tienen con qué confirmar
+            # (ver GoogleAuthSerializer.create): se deja pasar el cambio sin pedirla.
+            if self.instance.has_usable_password():
+                current_password = attrs.get("current_password")
+                if not current_password or not self.instance.check_password(current_password):
+                    raise serializers.ValidationError(
+                        {"current_password": "Contraseña actual incorrecta."}
+                    )
+        attrs.pop("current_password", None)
+        return attrs
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """
+    Cambio de password del usuario logueado. Si la cuenta todavía no tiene
+    password usable (alta por Google, ver GoogleAuthSerializer.create), no se
+    exige current_password — es un alta de password, no un cambio.
+    """
+
+    current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if user.has_usable_password():
+            current_password = attrs.get("current_password")
+            if not current_password or not user.check_password(current_password):
+                raise serializers.ValidationError(
+                    {"current_password": "Contraseña actual incorrecta."}
+                )
+        return attrs
+
+    def save(self):
+        user = self.context["request"].user
+        user.set_password(self.validated_data["new_password"])
+        user.save(update_fields=["password"])
+        return user
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """
+    Confirma el link de recuperación mandado por PasswordResetRequestView.
+    uid/token son los que genera default_token_generator (mismo mecanismo que
+    usa el admin de Django) — no hace falta ningún modelo nuevo, el token
+    expira solo a los 3 días (PASSWORD_RESET_TIMEOUT, default de Django).
+    """
+
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate(self, attrs):
+        try:
+            user = User.objects.get(pk=urlsafe_base64_decode(attrs["uid"]).decode())
+        except (User.DoesNotExist, ValueError, TypeError, OverflowError):
+            raise serializers.ValidationError("El link de recuperación no es válido.")
+        if not default_token_generator.check_token(user, attrs["token"]):
+            raise serializers.ValidationError("El link de recuperación no es válido o expiró.")
+        self.context["user"] = user
+        return attrs
+
+    def save(self):
+        user = self.context["user"]
+        user.set_password(self.validated_data["new_password"])
+        user.save(update_fields=["password"])
+        return user
 
 
 class FavoriteSerializer(serializers.ModelSerializer):
