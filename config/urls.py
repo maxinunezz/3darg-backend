@@ -4,6 +4,8 @@ from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+import config.admin_dashboard  # noqa: F401 — aplica el reagrupamiento del sidebar del admin
+
 urlpatterns = [
     path("admin/", admin.site.urls),
 
