@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
+from rest_framework.throttling import SimpleRateThrottle
 from django.views.generic import TemplateView
 from django.shortcuts import get_object_or_404
 
@@ -25,11 +26,47 @@ from .services.reconciliation import apply_payment_status, reconcile_order
 logger = logging.getLogger(__name__)
 
 
+class CheckoutThrottle(SimpleRateThrottle):
+    """Throttle propio del checkout, por IP — a diferencia de
+    `AnonRateThrottle` (que no throttlea nada si `request.user` está
+    autenticado, ver `get_cache_key` de DRF), este endpoint acepta compra de
+    invitado Y de usuario logueado por igual (ver CLAUDE.md, regla 2), así
+    que hay que limitarlo por IP sin importar la sesión — sin esto, el único
+    límite real era el genérico `user: 50000/day` (`DEFAULT_THROTTLE_RATES`),
+    que no frena nada flasheando creación de `Order`s/llamadas a MercadoPago
+    desde una cuenta logueada. Mismo patrón que `ContactThrottle`/
+    `VendingLeadThrottle`, pero sin el bypass de `AnonRateThrottle`."""
+
+    scope = "checkout"
+    rate = "20/hour"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+
 class MercadoPagoCheckoutProCreateAPIView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [CheckoutThrottle]
 
     @transaction.atomic
     def post(self, request):
+        # Chequeo ANTES de crear nada en la base: un `return Response(...)`
+        # normal dentro de un bloque `@transaction.atomic` NO hace rollback
+        # (Django solo revierte ante una excepción no manejada que se
+        # propague fuera del bloque) — antes este chequeo vivía más abajo,
+        # después de `Order.objects.create()`/`OrderItem.objects.bulk_create()`,
+        # así que si faltaba `MP_NOTIFICATION_URL` la vista devolvía 500 pero
+        # la `Order` (con sus `OrderItem`) quedaba creada y confirmada en la
+        # base igual — una orden huérfana, sin preferencia de pago ni forma
+        # de que el comprador la pague. Resolver esto antes de tocar la base
+        # evita depender de las reglas de rollback de `atomic`.
+        notification_url = os.getenv("MP_NOTIFICATION_URL", "").strip()
+        if not notification_url:
+            return Response(
+                {"detail": "MP_NOTIFICATION_URL no está configurado"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
         serializer = CheckoutProCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -166,38 +203,38 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         # consistente con lo que se mostró antes de pagar.
         postal_code = (data.get("postal_code") or "").strip()
         province = (data.get("province") or "").strip()
-        shipping_method_id = (data.get("shipping_method_id") or "").strip()
-        # Se necesita la modalidad ANTES de saber si hay envío gratis (cada
-        # una tiene su propio umbral) — mismo `partition("_")` que se usa
-        # más abajo para derivar `shipping_method`/`shipping_modality` del
-        # método finalmente cobrado.
-        _, _, requested_modality = shipping_method_id.partition("_")
+        # `CheckoutProCreateSerializer.shipping_method_id` ya es un
+        # `ChoiceField` que solo acepta "correoargentino_sucursal"/
+        # "correoargentino_domicilio" — `serializer.is_valid(raise_exception=True)`
+        # más arriba ya rechazó con 400 cualquier otro valor (vacío
+        # incluido). Por eso `shipping_method`/`shipping_modality` se pueden
+        # derivar ACÁ, una sola vez, y quedan garantizados para las dos
+        # ramas de abajo (gratis y pagado) — antes se derivaban "si vino
+        # `shipping_method_id`" en la rama gratis y "si matcheó una
+        # cotización" en la pagada, así que un valor vacío o inválido
+        # dejaba `shipping_method`/`shipping_modality` en `""` en cualquiera
+        # de las dos ramas y esquivaba por completo la validación de
+        # dirección de más abajo (bug real: permitía cobrar envío gratis —o
+        # el más barato— sin pedir nunca la dirección ni la sucursal).
+        shipping_method_id = data["shipping_method_id"]
+        shipping_method, _, shipping_modality = shipping_method_id.partition("_")
         free_shipping_threshold = (brand.shipping_config or {}).get(
-            f"free_shipping_threshold_{requested_modality}"
-        ) if requested_modality in ("sucursal", "domicilio") else None
-        shipping_cost = Decimal("0")
-        shipping_method = ""
-        shipping_modality = ""
+            f"free_shipping_threshold_{shipping_modality}"
+        )
         if free_shipping_threshold and subtotal >= Decimal(str(free_shipping_threshold)):
             shipping_cost = Decimal("0")
-            # Aunque el envío salga gratis, igual hace falta saber qué
-            # modalidad eligió el comprador (sucursal vs domicilio) para
-            # validar la dirección correspondiente más abajo y para el alta
-            # real en Correo Argentino (`deliveryType`).
-            if shipping_method_id:
-                shipping_method, _, shipping_modality = shipping_method_id.partition("_")
         else:
             # `get_quotes()` intenta cotización EN VIVO contra la API real de
             # Correo Argentino (`POST /rates`) cuando se conoce `postal_code`
             # de destino y hay credenciales cargadas; si no (sin CP, sin
             # credenciales, o falla la consulta), cae a la tabla estática por
             # peso/Valor Declarado (ver `quote.py`) — nunca deja un método sin
-            # cotizar. Se calcula siempre, se haya mandado CP o no. Si el
-            # comprador eligió un método en el selector del carrito
-            # (`select_methods()`) se cobra ESE precio y se guarda qué
-            # eligió; si no vino `shipping_method_id` o no matchea ningún
-            # método, se cae al más barato (mismo comportamiento que antes de
-            # este selector).
+            # cotizar. Se calcula siempre, se haya mandado CP o no. Se cobra
+            # el precio de la cotización que matchea el método elegido; si
+            # por algún motivo no matcheara ninguna (no debería pasar, ya que
+            # `select_methods()` siempre devuelve las dos entradas posibles),
+            # se cae al más barato como resguardo, sin dejar de exigir la
+            # dirección/sucursal correspondiente más abajo.
             shipping_items = [(products_by_id[it["product_id"]], it["quantity"]) for it in items_data]
             quote_result = get_quotes(
                 postal_code=postal_code,
@@ -208,7 +245,6 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             selected = next((m for m in methods if m["id"] == shipping_method_id), None)
             if selected:
                 shipping_cost = Decimal(str(selected["price"]))
-                shipping_method, _, shipping_modality = selected["id"].partition("_")
             else:
                 shipping_cost = cheapest_price(quote_result["quotes"])
 
@@ -218,9 +254,10 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         # `correo_argentino.py::_build_shipment_payload()`), la dirección
         # completa NO es obligatoria (`shipping.address` solo se exige si
         # `deliveryType != "S"`); en domicilio sí hace falta la dirección
-        # completa del comprador. Si el método elegido no matcheó nada
-        # (fallback por CP ausente), no se exige nada nuevo — se mantiene el
-        # comportamiento histórico de checkout mínimo.
+        # completa del comprador. `shipping_method`/`shipping_modality` ya
+        # están garantizados (ver arriba), así que esta validación corre
+        # siempre, sin importar si la cotización en vivo matcheó o cayó al
+        # fallback más barato.
         address_fields = {
             "shipping_full_name": (data.get("full_name") or "").strip(),
             "shipping_phone": (data.get("phone") or "").strip(),
@@ -305,13 +342,8 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
         ]
         OrderItem.objects.bulk_create(order_items)
 
-        notification_url = os.getenv("MP_NOTIFICATION_URL", "").strip()
-        if not notification_url:
-            return Response(
-                {"detail": "MP_NOTIFICATION_URL no está configurado"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
+        # `notification_url` ya se validó al principio de la vista, antes de
+        # crear la `Order` — ver comentario ahí.
         frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
         back_urls = {
             "success": f"{frontend_base}/checkout/success/?order_id={order.id}",

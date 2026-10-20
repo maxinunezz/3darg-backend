@@ -91,7 +91,12 @@ class CategoryListAPIView(generics.ListAPIView):
     pagination_class = None
 
     def get_queryset(self):
-        qs = Category.objects.all()
+        # `CategorySerializer` lee `parent.id`/`parent.name`/`parent.slug`
+        # por cada categoría — sin `select_related("parent")` eso disparaba
+        # una query extra por fila (N+1 real: ~90 queries de más con el
+        # catálogo de categorías de Lumy, que tiene varias raíces con
+        # subcategorías, todas con `parent` cargado).
+        qs = Category.objects.select_related("parent").all()
         brand_slug = self.request.query_params.get("brand_slug")
         if brand_slug:
             qs = qs.filter(brand__slug=brand_slug)
@@ -261,6 +266,17 @@ class CosteoSyncAPIView(APIView):
         except (InvalidOperation, TypeError):
             return Response(
                 {"error": "sale_price es obligatorio y tiene que ser numérico."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Sin este chequeo, un `sale_price` negativo (o cero) llegaba hasta
+        # `CostTemplate.sale_price` y de ahí se propagaba tal cual a
+        # `ProductVariant.price`/`Product.price` de TODO lo vinculado al
+        # template — un precio negativo/cero publicado en la web y
+        # republicado en Mercado Libre (`sync_product()` más abajo), sin que
+        # nada lo bloqueara antes.
+        if sale_price <= 0:
+            return Response(
+                {"error": "sale_price tiene que ser mayor a cero."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

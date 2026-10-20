@@ -171,6 +171,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework',
     'rest_framework.authtoken',  # Token fijo para integraciones server-to-server (ver products/views.py::CosteoSyncAPIView)
+    'rest_framework_simplejwt.token_blacklist',  # invalida refresh tokens rotados (ver SIMPLE_JWT abajo)
     'django_filters',
     'brands',
     'cms',
@@ -261,6 +262,15 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=2),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
+    # Con `ROTATE_REFRESH_TOKENS=True` sin esto, un refresh token viejo
+    # (interceptado o filtrado) seguía sirviendo para pedir access tokens
+    # nuevos después de haber sido rotado — rotar no invalidaba nada, solo
+    # emitía uno nuevo en paralelo. `BLACKLIST_AFTER_ROTATION` hace que
+    # `TokenRefreshView` liste el refresh token usado en la tabla de
+    # blacklist (app `rest_framework_simplejwt.token_blacklist`, sumada a
+    # `INSTALLED_APPS`) apenas se usa para rotar, así que un reintento con
+    # ese mismo token ya rotado se rechaza.
+    'BLACKLIST_AFTER_ROTATION': True,
 }
 
 # --- CORS ---

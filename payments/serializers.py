@@ -21,10 +21,20 @@ class CheckoutProCreateSerializer(serializers.Serializer):
     postal_code = serializers.CharField(required=False, allow_blank=True, max_length=10)
     province = serializers.CharField(required=False, allow_blank=True, max_length=2)
     # Id del método elegido en el selector del carrito (ver
-    # `shipping/services/quote.py::select_methods()`, ej. "correoargentino_domicilio").
-    # Si no viene o no matchea ninguna cotización vigente, se cae al más
-    # barato (`cheapest_price()`), igual que antes de este selector.
-    shipping_method_id = serializers.CharField(required=False, allow_blank=True, max_length=40)
+    # `shipping/services/quote.py::select_methods()`, que siempre devuelve
+    # exactamente estas dos entradas). Se exige uno de los dos valores reales
+    # — antes era un `CharField` libre y opcional, lo que permitía mandar
+    # cualquier string (o directamente nada) para esquivar la validación de
+    # dirección de `MercadoPagoCheckoutProCreateAPIView` y crear pedidos sin
+    # dirección, incluso en la rama de envío gratis. El frontend siempre
+    # manda uno de los dos ids reales (`shipping-estimator.tsx` tiene
+    # "sucursal" seleccionado por default) salvo que la cotización todavía
+    # esté cargando o haya fallado — ese caso ahora lo bloquea `canCheckout`
+    # en el frontend antes de llegar a pegarle a este endpoint.
+    shipping_method_id = serializers.ChoiceField(
+        choices=["correoargentino_sucursal", "correoargentino_domicilio"],
+        error_messages={"invalid_choice": "Elegí un método de envío válido."},
+    )
 
     # Dirección completa del comprador — se exige para los dos métodos de
     # envío (PaqAr v2 la pide siempre, aunque sea "a sucursal", ver CLAUDE.md
