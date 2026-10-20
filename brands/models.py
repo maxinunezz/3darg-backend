@@ -1,6 +1,80 @@
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator
 from django.db import models
 from django.utils.text import slugify
+
+
+# Claves válidas de `meta_config` (ver help_text del campo abajo). Un typo
+# acá (ej. "pixle_id") dejaba la marca sin Pixel/Conversions API sin ningún
+# aviso — `meta_conversions.py` simplemente no encuentra la clave esperada y
+# hace un no-op silencioso (mismo criterio "vacío = apagado" de siempre,
+# pero sin que nadie se entere de que en realidad fue un error de tipeo).
+META_CONFIG_KEYS = {
+    "pixel_id",
+    "conversions_api_access_token",
+    "catalog_id",
+    "whatsapp_business_phone_id",
+}
+
+# Claves válidas de nivel superior de `page_config` — espejo exacto de
+# `BrandPageConfig` en `ecommerce-frontend/types/brands.ts` (la fuente de
+# verdad real; el help_text del campo/`BrandAdmin` describe solo el
+# subconjunto "genérico" y quedó desactualizado frente a lo que el frontend
+# ya consume de verdad — confirmado contra `Brand.objects.all()` en dev,
+# donde Lumy/Print&Gym/MiniSlam/CyberWeed ya usan varias de estas claves).
+# Si el frontend agrega una clave nueva a `BrandPageConfig`, hay que sumarla
+# acá también — si no, esta validación empieza a rechazar page_config válido.
+# `lumy`/`whatsapp_channel` son objetos anidados especiales (con sub-claves
+# opcionales en varios niveles) — acá solo se valida que sean dict, no su
+# estructura interna completa.
+PAGE_CONFIG_KEYS = {
+    "lumy",
+    "sections",
+    "panels",
+    "hero_style",
+    "stats",
+    "features",
+    "features_title",
+    "lifestyle_headline",
+    "lifestyle_subheadline",
+    "lifestyle_cta",
+    "newsletter_title",
+    "newsletter_subtitle",
+    "newsletter_cta",
+    "about_cases",
+    "community_headline",
+    "community_subheadline",
+    "community_description",
+    "community_benefits",
+    "community_bg_variant",
+    "community_bg_image",
+    "community_cta_register",
+    "community_cta_login",
+    "whatsapp_channel",
+}
+
+HERO_STYLE_CHOICES = {"minimal", "full", "split"}
+
+
+def _list_of_dicts_error(value, field_label, expected_subkeys):
+    """Valida que `value` (ej. `page_config["features"]`) sea una lista de
+    objetos con al menos una de las claves esperadas. Devuelve un mensaje de
+    error en español, o `None` si está todo bien (incluye `value is None`,
+    o sea que la clave ni se cargó — sigue siendo válido, todo es opcional).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return f"{field_label} debe ser una lista."
+    for item in value:
+        if not isinstance(item, dict):
+            return f"{field_label} debe ser una lista de objetos."
+        if not expected_subkeys & set(item):
+            return (
+                f"Un elemento de {field_label} no tiene ninguna de las claves "
+                f"esperadas ({', '.join(sorted(expected_subkeys))})."
+            )
+    return None
 
 
 class Brand(models.Model):
@@ -177,6 +251,91 @@ class Brand(models.Model):
         if not self.slug:
             self.slug = slugify(self.name)
         super().save(*args, **kwargs)
+
+    def clean(self):
+        """Valida el esquema de `theme`/`meta_config`/`page_config`
+        (JSONField de forma libre) para atrapar errores de tipeo ANTES de
+        guardar — sin esto, una clave mal escrita (ej. "pixle_id",
+        "lifestyle_headlin") no rompe nada del lado del backend, pero el
+        frontend simplemente no encuentra el dato esperado y se cae en
+        silencio a su default (o, en el peor caso, no renderiza la sección).
+        No valida la estructura interna completa de `page_config.lumy`/
+        `page_config.whatsapp_channel` (objetos anidados, con sub-claves
+        opcionales en varios niveles, ver `BrandPageConfig` en
+        `ecommerce-frontend/types/brands.ts`) — alcanza con confirmar que
+        sean dict, el resto se audita a mano si hace falta. Se corre vía
+        `ModelForm.full_clean()`, mismo mecanismo que `Product.clean()`.
+        """
+        super().clean()
+        errors = {}
+
+        if not isinstance(self.theme, dict):
+            errors["theme"] = "theme debe ser un objeto JSON (clave: valor)."
+        else:
+            bad = sorted(k for k, v in self.theme.items() if not isinstance(v, str))
+            if bad:
+                errors["theme"] = (
+                    f"Los valores de theme deben ser texto (CSS custom "
+                    f"properties) — revisá: {', '.join(bad)}."
+                )
+
+        if not isinstance(self.meta_config, dict):
+            errors["meta_config"] = "meta_config debe ser un objeto JSON (clave: valor)."
+        else:
+            unknown = sorted(set(self.meta_config) - META_CONFIG_KEYS)
+            if unknown:
+                errors["meta_config"] = (
+                    f"Clave(s) desconocida(s) en meta_config: {', '.join(unknown)}. "
+                    f"Válidas: {', '.join(sorted(META_CONFIG_KEYS))}."
+                )
+            else:
+                bad = sorted(
+                    k for k, v in self.meta_config.items()
+                    if v is not None and not isinstance(v, str)
+                )
+                if bad:
+                    errors["meta_config"] = (
+                        f"Los valores de meta_config deben ser texto — revisá: {', '.join(bad)}."
+                    )
+
+        if not isinstance(self.page_config, dict):
+            errors["page_config"] = "page_config debe ser un objeto JSON (clave: valor)."
+        else:
+            unknown = sorted(set(self.page_config) - PAGE_CONFIG_KEYS)
+            if unknown:
+                errors["page_config"] = (
+                    f"Clave(s) desconocida(s) en page_config: {', '.join(unknown)}. "
+                    f"Válidas: {', '.join(sorted(PAGE_CONFIG_KEYS))}."
+                )
+            else:
+                hero_style = self.page_config.get("hero_style")
+                nested_dict_keys = sorted(
+                    k for k in ("lumy", "whatsapp_channel")
+                    if self.page_config.get(k) is not None
+                    and not isinstance(self.page_config.get(k), dict)
+                )
+                if hero_style is not None and hero_style not in HERO_STYLE_CHOICES:
+                    errors["page_config"] = (
+                        f"hero_style inválido ({hero_style!r}) — válidos: "
+                        f"{', '.join(sorted(HERO_STYLE_CHOICES))}."
+                    )
+                elif nested_dict_keys:
+                    errors["page_config"] = (
+                        f"Debe ser un objeto JSON: {', '.join(f'page_config.{k}' for k in nested_dict_keys)}."
+                    )
+                else:
+                    msg = _list_of_dicts_error(
+                        self.page_config.get("features"), "page_config.features",
+                        {"icon", "title", "desc"},
+                    ) or _list_of_dicts_error(
+                        self.page_config.get("stats"), "page_config.stats",
+                        {"value", "label"},
+                    )
+                    if msg:
+                        errors["page_config"] = msg
+
+        if errors:
+            raise ValidationError(errors)
 
     def __str__(self):
         return self.name

@@ -111,9 +111,17 @@ class CartItemAPIView(APIView):
     def patch(self, request, item_id):
         item = get_object_or_404(CartItem, id=item_id, cart__user=request.user)
         qty = request.data.get("quantity")
-        if not qty or int(qty) < 1:
+        # `int(qty)` con un valor no numérico (ej. `"abc"`, `null`, un dict)
+        # lanzaba `ValueError`/`TypeError` sin atrapar -> 500 en vez de un 400
+        # prolijo. El chequeo viejo (`not qty or int(qty) < 1`) ya asumía que
+        # `int(qty)` iba a funcionar siempre.
+        try:
+            qty_int = int(qty)
+        except (TypeError, ValueError):
+            return Response({"detail": "quantity debe ser un número >= 1"}, status=status.HTTP_400_BAD_REQUEST)
+        if qty_int < 1:
             return Response({"detail": "quantity debe ser >= 1"}, status=status.HTTP_400_BAD_REQUEST)
-        item.quantity = int(qty)
+        item.quantity = qty_int
         item.save()
         return Response(CartSerializer(item.cart, context={"request": request}).data)
 

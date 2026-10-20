@@ -1,8 +1,12 @@
 import json
+import logging
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
+from django.core.management.utils import get_random_secret_key
 
 load_dotenv()
 
@@ -23,8 +27,34 @@ if SENTRY_DSN:
         environment="development" if os.getenv("DJANGO_DEBUG", "0") == "1" else "production",
     )
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-change-me")
 DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
+
+# `SECRET_KEY` firma sesiones, el CSRF token y los links de reset de
+# contraseña (y, salvo que SimpleJWT use una `SIGNING_KEY` propia, también
+# los JWT) — un default hardcodeado como `"dev-secret-change-me"` queda
+# expuesto en el repo (público o no) y sirve para forjar cualquiera de esos
+# tokens en cualquier instalación que se haya olvidado de cargar
+# `DJANGO_SECRET_KEY`. En producción (`DJANGO_DEBUG=0`) no hay valor por
+# defecto seguro posible: falla explícito en vez de arrancar con un secreto
+# conocido de antemano. En dev, para no romper un `docker compose up`
+# nuevo sin `.env` todavía armado, se genera una clave aleatoria distinta en
+# cada arranque (nunca la misma, nunca persistida) — invalida sesiones al
+# reiniciar, pero nunca es adivinable.
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = get_random_secret_key()
+        logging.getLogger(__name__).warning(
+            "DJANGO_SECRET_KEY no está seteado — usando una clave aleatoria "
+            "temporal (solo válida mientras dure este proceso). Cargá "
+            "DJANGO_SECRET_KEY en el .env antes de levantar producción."
+        )
+    else:
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY es obligatorio con DJANGO_DEBUG=0 (producción) "
+            "— no hay un valor por defecto seguro. Cargalo en las env vars "
+            "del servicio (Railway) antes de desplegar."
+        )
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost").split(",") if h.strip()]
 
 # --- Google OAuth (login "Continuar con Google") ---

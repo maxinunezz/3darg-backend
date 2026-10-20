@@ -11,6 +11,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.throttling import SimpleRateThrottle
 from django.views.generic import TemplateView
 from django.shortcuts import get_object_or_404
+from django.http import Http404
 
 from brands.models import Brand
 from orders.models import Order, OrderItem
@@ -480,5 +481,15 @@ class PaymentSuccessView(TemplateView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         order_id = self.request.GET.get('order_id')
-        context['order'] = get_object_or_404(Order, id=order_id)
+        # `Order.id` es UUIDField — un `order_id` ausente o con formato
+        # inválido (típico de alguien tipeando la URL a mano, o un bot
+        # probando parámetros) hacía que `Order.objects.get(id=...)` lanzara
+        # `ValueError`/`ValidationError` (UUID mal formado) en vez de
+        # `DoesNotExist`, que es lo único que `get_object_or_404` atrapa —
+        # resultado: 500 en vez de un 404 prolijo.
+        try:
+            order_uuid = uuid.UUID(str(order_id))
+        except (ValueError, TypeError, AttributeError):
+            raise Http404("Pedido no encontrado.")
+        context['order'] = get_object_or_404(Order, id=order_uuid)
         return context
