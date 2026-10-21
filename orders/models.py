@@ -5,11 +5,11 @@ from django.db import models
 
 class Order(models.Model):
     class Status(models.TextChoices):
-        DRAFT = "DRAFT", "Draft"
-        PENDING = "PENDING", "Pending payment"
-        PAID = "PAID", "Paid"
-        REJECTED = "REJECTED", "Rejected"
-        CANCELLED = "CANCELLED", "Cancelled"
+        DRAFT = "DRAFT", "Borrador"
+        PENDING = "PENDING", "Pago pendiente"
+        PAID = "PAID", "Pagado"
+        REJECTED = "REJECTED", "Rechazado"
+        CANCELLED = "CANCELLED", "Cancelado"
 
     class PaymentChannel(models.TextChoices):
         MERCADOPAGO = "mercadopago", "Mercado Pago"
