@@ -45,6 +45,27 @@ _CARGA_MASIVA_CSV_HEADERS = [
 ]
 
 
+class TieneErrorCorreoArgentinoFilter(admin.SimpleListFilter):
+    """Filtro dedicado (en vez del genérico `EmptyFieldListFilter`) para que
+    el título en el sidebar sea explícito sobre qué significa — pedido del
+    dueño tras no notar que "Reintentar alta en Correo Argentino" había
+    fallado en silencio (el error quedaba guardado en
+    `correo_argentino_sync_error` pero no se veía en ningún lado sin abrir
+    cada pedido)."""
+    title = "Envío Correo Argentino con error"
+    parameter_name = "tiene_error_correo_argentino"
+
+    def lookups(self, request, model_admin):
+        return (("si", "Sí, con error"), ("no", "No / sin error"))
+
+    def queryset(self, request, queryset):
+        if self.value() == "si":
+            return queryset.exclude(correo_argentino_sync_error="")
+        if self.value() == "no":
+            return queryset.filter(correo_argentino_sync_error="")
+        return queryset
+
+
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 0
@@ -69,12 +90,13 @@ class OrderItemInline(admin.TabularInline):
 class OrderAdmin(admin.ModelAdmin):
     list_display = (
         "codigo_referencia", "id", "brand", "user", "status", "payment_channel", "total_amount",
-        "shipping_cost", "shipping_method", "shipping_modality", "correo_argentino_tracking_number",
+        "shipping_cost", "shipping_method", "shipping_modality", "estado_envio_correo_argentino",
         "tiene_comprobante", "vendido_de_mas", "currency", "created_at",
     )
     list_filter = (
         "brand", "status", "payment_channel", "shipping_method", "oversold",
         ("transfer_receipt", admin.EmptyFieldListFilter),
+        TieneErrorCorreoArgentinoFilter,
     )
     search_fields = (
         "id", "external_reference", "customer_email", "user__email",
@@ -82,7 +104,7 @@ class OrderAdmin(admin.ModelAdmin):
     )
     readonly_fields = (
         "id", "external_reference", "created_at", "updated_at",
-        "correo_argentino_tracking_number", "correo_argentino_sync_error",
+        "correo_argentino_tracking_number", "correo_argentino_sync_error_detalle",
         "transfer_receipt_uploaded_at", "transfer_receipt_preview",
         "oversold", "oversold_detail",
     )
@@ -117,7 +139,7 @@ class OrderAdmin(admin.ModelAdmin):
             ),
         }),
         ("Envío — Correo Argentino (API MiCorreo)", {
-            "fields": ("correo_argentino_tracking_number", "correo_argentino_sync_error"),
+            "fields": ("correo_argentino_tracking_number", "correo_argentino_sync_error_detalle"),
         }),
         ("Transferencia — comprobante", {
             "fields": ("transfer_receipt", "transfer_receipt_uploaded_at", "transfer_receipt_preview"),
@@ -152,6 +174,42 @@ class OrderAdmin(admin.ModelAdmin):
     @admin.display(description="¿Vendido de más?", boolean=True)
     def vendido_de_mas(self, obj):
         return obj.oversold
+
+    @admin.display(description="Estado envío (Correo Argentino)")
+    def estado_envio_correo_argentino(self, obj):
+        """Columna de un vistazo en el listado — antes había que abrir cada
+        pedido para notar que 'Reintentar alta en Correo Argentino' había
+        fallado (el error quedaba solo en `correo_argentino_sync_error`,
+        sin ningún indicio visible desde el listado ni desde el mensaje
+        genérico de la acción). El `title` del `<span>` muestra el error
+        completo al pasar el mouse, sin tener que entrar al detalle."""
+        if obj.shipping_method != "correoargentino":
+            return "—"
+        if obj.correo_argentino_sync_error:
+            return format_html(
+                '<span style="color: #b91c1c; font-weight: 600; cursor: help;" title="{}">'
+                "⚠ Error</span>",
+                obj.correo_argentino_sync_error,
+            )
+        if obj.correo_argentino_tracking_number:
+            return format_html(
+                '<span style="color: #15803d; font-weight: 600;">✓ Dado de alta</span>'
+            )
+        return format_html('<span style="color: #6b7280;">Pendiente</span>')
+
+    @admin.display(description="Error de sincronización")
+    def correo_argentino_sync_error_detalle(self, obj):
+        """Mismo dato que el campo `correo_argentino_sync_error` crudo, pero
+        resaltado en rojo en la ficha del pedido — antes se veía como texto
+        plano readonly, fácil de pasar por alto entre el resto de los
+        campos de envío."""
+        if not obj.correo_argentino_sync_error:
+            return "(sin error)"
+        return format_html(
+            '<div style="color:#b91c1c; background:#fee2e2; border:1px solid #fecaca; '
+            'border-radius:6px; padding:10px 14px; font-weight:600; max-width:640px;">{}</div>',
+            obj.correo_argentino_sync_error,
+        )
 
     @admin.display(description="Vista previa del comprobante")
     def transfer_receipt_preview(self, obj):
@@ -242,21 +300,39 @@ class OrderAdmin(admin.ModelAdmin):
         un reintento sobre una orden ya dada de alta debería ser rechazado
         por la API con "La orden ya fue importada con anterioridad" (queda
         reflejado en el error, no genera un envío duplicado).
+
+        Antes esto solo mostraba un mensaje genérico ("se reintentó para N
+        orden(es)") sin decir si había fallado — había que abrir cada pedido
+        a mano para notar el error real en `correo_argentino_sync_error`. Acá
+        se chequea el resultado de cada orden (el mismo objeto `order` que
+        pasamos a `_create_correo_argentino_shipment` queda actualizado en
+        memoria, no hace falta `refresh_from_db()`) y se muestra el error
+        real como mensaje ROJO por cada orden que siguió fallando.
         """
-        afectadas = 0
+        exitosas = 0
+        fallidas = []
         omitidas = 0
         for order in queryset:
             if order.shipping_method != "correoargentino":
                 omitidas += 1
                 continue
             _create_correo_argentino_shipment(order)
-            afectadas += 1
+            if order.correo_argentino_sync_error:
+                fallidas.append(order)
+            else:
+                exitosas += 1
 
-        if afectadas:
+        if exitosas:
             self.message_user(
                 request,
-                f"Se reintentó el alta en Correo Argentino para {afectadas} orden(es). "
-                "Revisá 'correo_argentino_tracking_number'/'correo_argentino_sync_error' de cada una.",
+                f"Se dio de alta el envío en Correo Argentino para {exitosas} orden(es).",
+            )
+        for order in fallidas:
+            self.message_user(
+                request,
+                f"Orden {reference_code(order)} ({order.id}) — Correo Argentino rechazó el alta: "
+                f"{order.correo_argentino_sync_error}",
+                level=messages.ERROR,
             )
         if omitidas:
             self.message_user(
