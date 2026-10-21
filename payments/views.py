@@ -3,6 +3,7 @@ import uuid
 import logging
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -20,9 +21,15 @@ from products.services.combo_pricing import compute_unit_prices
 from cart.services.cart_discount import compute_cart_pricing
 from shipping.services.quote import cheapest_price, get_quotes, select_methods
 from .models import MercadoPagoPayment
-from .serializers import CheckoutProCreateSerializer
+from .serializers import CheckoutProCreateSerializer, TransferCheckoutCreateSerializer
 from .services.mercadopago import create_preference, get_payment, is_valid_webhook_signature
 from .services.reconciliation import apply_payment_status, reconcile_order
+from .services.transfer_discount import apply_transfer_discount
+from .services.transfer_notifications import (
+    reference_code,
+    send_transfer_instructions_email,
+    send_transfer_pending_owner_email,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -345,11 +352,17 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
 
         # `notification_url` ya se validó al principio de la vista, antes de
         # crear la `Order` — ver comentario ahí.
+        # `brand` viaja como query param para que la página de éxito (que vive
+        # en la ruta raíz `/checkout/success`, compartida por todas las
+        # marcas) sepa a qué espacio de marca volver — sin esto, "Ver mis
+        # pedidos"/"Seguir comprando" mandaban siempre a 3DARG sin importar
+        # desde qué sub-marca se compró (ver mismo fix en
+        # `TransferCheckoutCreateAPIView`/`checkout/transfer`).
         frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
         back_urls = {
-            "success": f"{frontend_base}/checkout/success/?order_id={order.id}",
-            "failure": f"{frontend_base}/checkout/failure/?order_id={order.id}",
-            "pending": f"{frontend_base}/checkout/pending/?order_id={order.id}",
+            "success": f"{frontend_base}/checkout/success/?order_id={order.id}&brand={brand.slug}",
+            "failure": f"{frontend_base}/checkout/failure/?order_id={order.id}&brand={brand.slug}",
+            "pending": f"{frontend_base}/checkout/pending/?order_id={order.id}&brand={brand.slug}",
         }
 
         pref = create_preference(
@@ -379,6 +392,287 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class TransferCheckoutCreateAPIView(APIView):
+    """Checkout por transferencia bancaria manual ("Opción 1") — alternativa
+    a `MercadoPagoCheckoutProCreateAPIView` para quien prefiere pagar por
+    transferencia (y, si la marca tiene `transfer_discount_percent`
+    cargado, pagar más barato por elegir este canal). Mismo contrato de
+    entrada (serializer, validación de stock/dirección/envío) que el
+    checkout de MP — lo que cambia es qué pasa después de crear la `Order`:
+    no se llama a ninguna API de pago, se manda por mail el alias/CBU y el
+    dueño confirma el ingreso a mano desde el admin
+    (`orders/admin.py::confirmar_transferencia_recibida`, que reusa el
+    signal existente de `orders/signals.py` sin duplicar nada de esa
+    lógica).
+
+    Stock: igual criterio que MercadoPago — se VALIDA (no se reserva) acá,
+    recién se descuenta cuando la orden pasa a `PAID` (vía el signal). Un
+    pedido PENDING por transferencia que nunca se confirma y se cancela
+    (a mano o por `expire_pending_transfers`) no necesita restituir nada,
+    porque nunca se descontó.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [CheckoutThrottle]
+
+    @transaction.atomic
+    def post(self, request):
+        # Mismo criterio "vacío = apagado" que el resto de las
+        # integraciones: sin cuenta bancaria configurada, este canal no
+        # existe — chequeado ANTES de tocar la base, mismo motivo que el
+        # chequeo de `MP_NOTIFICATION_URL` en el checkout de MP (evitar una
+        # `Order` huérfana si `@transaction.atomic` no hace rollback de un
+        # `return` normal).
+        if not settings.TRANSFER_BANK_ALIAS or not settings.TRANSFER_BANK_CBU:
+            return Response(
+                {"detail": "El pago por transferencia no está disponible todavía."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = TransferCheckoutCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        brand = Brand.objects.filter(slug=data["brand_slug"], is_active=True).first()
+        if not brand:
+            return Response({"detail": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if brand.brand_type == "services":
+            return Response(
+                {"detail": "This brand is services-only. No checkout available."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user if request.user.is_authenticated else None
+
+        items_data = data["items"]
+        product_ids = [it["product_id"] for it in items_data]
+
+        products_qs = Product.objects.select_related("category").filter(
+            id__in=product_ids,
+            brand=brand,
+            is_available=True,
+            is_available_web=True,
+        )
+        products_by_id = {p.id: p for p in products_qs}
+
+        missing = [pid for pid in product_ids if pid not in products_by_id]
+        if missing:
+            return Response(
+                {"detail": f"Producto(s) no disponible(s): {missing}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        variant_ids = [it["variant_id"] for it in items_data if it.get("variant_id")]
+        variants_by_id = {
+            v.id: v
+            for v in ProductVariant.objects.filter(
+                id__in=variant_ids, product_id__in=product_ids, is_available=True
+            )
+        }
+        missing_variants = [
+            it["variant_id"] for it in items_data
+            if it.get("variant_id") and it["variant_id"] not in variants_by_id
+        ]
+        if missing_variants:
+            return Response(
+                {"detail": f"Talle(s) no disponible(s): {missing_variants}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        members_only = [p.name for p in products_by_id.values() if p.members_only]
+        if members_only and user is None:
+            return Response(
+                {"detail": f"Necesitás una cuenta para comprar: {', '.join(members_only)}"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        stock_errors = []
+        for it in items_data:
+            product = products_by_id[it["product_id"]]
+            variant = variants_by_id.get(it.get("variant_id"))
+            available_stock = variant.stock if variant is not None else product.stock
+            if available_stock < it["quantity"]:
+                label = f"{product.name} ({variant.label})" if variant is not None else product.name
+                stock_errors.append(
+                    f"'{label}': stock insuficiente ({available_stock} disponible(s))"
+                )
+        if stock_errors:
+            return Response(
+                {"detail": "; ".join(stock_errors)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        list_prices = compute_unit_prices(
+            user,
+            [
+                (
+                    products_by_id[it["product_id"]],
+                    it["quantity"],
+                    variants_by_id.get(it.get("variant_id")),
+                )
+                for it in items_data
+            ],
+        )
+        lines = [
+            (price, it["quantity"]) for it, price in zip(items_data, list_prices)
+        ]
+        pricing = compute_cart_pricing(brand, lines)
+        # El umbral de envío gratis (más abajo) se evalúa contra ESTE
+        # subtotal (descuento por cantidad, sin el de transferencia todavía)
+        # — decisión explícita: elegir transferencia no debería hacer
+        # perder el envío gratis que ya se había alcanzado. El descuento de
+        # transferencia se aplica después, solo sobre lo que efectivamente
+        # se cobra.
+        subtotal_before_transfer_discount = pricing["total"]
+        pricing = apply_transfer_discount(brand, pricing)
+        unit_prices = pricing["discounted_unit_prices"]
+        subtotal = pricing["total"]
+
+        postal_code = (data.get("postal_code") or "").strip()
+        province = (data.get("province") or "").strip()
+        shipping_method_id = data["shipping_method_id"]
+        shipping_method, _, shipping_modality = shipping_method_id.partition("_")
+        free_shipping_threshold = (brand.shipping_config or {}).get(
+            f"free_shipping_threshold_{shipping_modality}"
+        )
+        if free_shipping_threshold and subtotal_before_transfer_discount >= Decimal(str(free_shipping_threshold)):
+            shipping_cost = Decimal("0")
+        else:
+            shipping_items = [(products_by_id[it["product_id"]], it["quantity"]) for it in items_data]
+            quote_result = get_quotes(
+                postal_code=postal_code,
+                items=shipping_items,
+                declared_value=subtotal,
+            )
+            methods = select_methods(quote_result["quotes"])
+            selected = next((m for m in methods if m["id"] == shipping_method_id), None)
+            if selected:
+                shipping_cost = Decimal(str(selected["price"]))
+            else:
+                shipping_cost = cheapest_price(quote_result["quotes"])
+
+        address_fields = {
+            "shipping_full_name": (data.get("full_name") or "").strip(),
+            "shipping_phone": (data.get("phone") or "").strip(),
+            "shipping_street": (data.get("street") or "").strip(),
+            "shipping_street_number": (data.get("street_number") or "").strip(),
+            "shipping_floor": (data.get("floor") or "").strip(),
+            "shipping_department": (data.get("department") or "").strip(),
+            "shipping_city": (data.get("city") or "").strip(),
+            "shipping_province": province,
+            "shipping_agency_id": (data.get("agency_id") or "").strip(),
+        }
+        if shipping_method == "correoargentino" and shipping_modality == "sucursal":
+            missing_contact = [
+                field for field in ("shipping_full_name", "shipping_phone")
+                if not address_fields[field]
+            ]
+            if missing_contact or not province:
+                return Response(
+                    {"detail": "Falta completar nombre, teléfono y provincia para retirar en sucursal."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not address_fields["shipping_agency_id"]:
+                return Response(
+                    {"detail": "Falta elegir una sucursal de Correo Argentino."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif shipping_method == "correoargentino" and shipping_modality == "domicilio":
+            missing_address = [
+                field for field in ("shipping_street", "shipping_street_number", "shipping_city")
+                if not address_fields[field]
+            ]
+            if missing_address or not province:
+                return Response(
+                    {"detail": "Falta completar la dirección para el envío a domicilio."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        total = subtotal + shipping_cost
+        external_reference = uuid.uuid4().hex
+
+        order = Order.objects.create(
+            brand=brand,
+            user=request.user if request.user.is_authenticated else None,
+            status=Order.Status.PENDING,
+            payment_channel=Order.PaymentChannel.TRANSFER,
+            transfer_discount_percent_applied=pricing["transfer_discount_percent"],
+            currency=os.getenv("MP_CURRENCY", "ARS"),
+            total_amount=total,
+            shipping_cost=shipping_cost,
+            shipping_postal_code=postal_code,
+            shipping_method=shipping_method,
+            shipping_modality=shipping_modality,
+            **address_fields,
+            external_reference=external_reference,
+            customer_email=(
+                data.get("customer_email", "")
+                or (request.user.email if request.user.is_authenticated else "")
+            ),
+        )
+
+        order_items = [
+            OrderItem(
+                order=order,
+                product=products_by_id[it["product_id"]],
+                product_name=products_by_id[it["product_id"]].name,
+                variant=variants_by_id.get(it.get("variant_id")),
+                variant_label=(
+                    variants_by_id[it["variant_id"]].label
+                    if it.get("variant_id") in variants_by_id
+                    else ""
+                ),
+                quantity=it["quantity"],
+                unit_price=unit_price,
+            )
+            for it, unit_price in zip(items_data, unit_prices)
+        ]
+        OrderItem.objects.bulk_create(order_items)
+
+        logger.info(
+            "Checkout por transferencia creado: order=%s brand=%s total=%s descuento=%s%%",
+            order.id, brand.slug, total, pricing["transfer_discount_percent"],
+        )
+
+        send_transfer_instructions_email(order)
+        send_transfer_pending_owner_email(order)
+
+        return Response(
+            {
+                "order_id": str(order.id),
+                "reference": reference_code(order),
+                "total_amount": str(order.total_amount),
+                "currency": order.currency,
+                "transfer_discount_percent": pricing["transfer_discount_percent"],
+                "expires_in_hours": settings.TRANSFER_PENDING_EXPIRATION_HOURS,
+                "bank": {
+                    "alias": settings.TRANSFER_BANK_ALIAS,
+                    "cbu": settings.TRANSFER_BANK_CBU,
+                    "holder_name": settings.TRANSFER_BANK_HOLDER_NAME,
+                    "cuit": settings.TRANSFER_BANK_CUIT,
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TransferAvailabilityAPIView(APIView):
+    """`GET /api/payments/transfer/availability/` — le dice al frontend si
+    el canal "Transferencia" existe hoy, SIN exponer ningún dato de cuenta
+    (alias/CBU reales solo se devuelven al confirmarse el checkout, ver
+    `TransferCheckoutCreateAPIView`). Mismo chequeo "vacío = apagado" que
+    usa `TransferCheckoutCreateAPIView` antes de crear la orden — así el
+    selector de forma de pago del carrito (`cart-page-content.tsx`,
+    `site/cart-content.tsx`) puede ocultar la opción en vez de dejar que el
+    comprador la elija y recién se entere con un 400 al confirmar el pedido.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        available = bool(settings.TRANSFER_BANK_ALIAS and settings.TRANSFER_BANK_CBU)
+        return Response({"available": available})
 
 
 class MercadoPagoWebhookAPIView(APIView):
@@ -440,6 +734,15 @@ class OrderReconcileAPIView(APIView):
     A diferencia del webhook, no depende de que MP nos avise: consulta MP por
     external_reference (search_payments) y sincroniza. Es la red que cubre el
     caso "el webhook no llegó pero el cliente sí volvió".
+
+    Para órdenes de transferencia (`payment_channel=TRANSFER`) este mismo
+    endpoint es seguro de llamar: `reconcile_order()` busca el pago en MP por
+    `external_reference`, no encuentra nada (no existe ningún pago de MP para
+    esa orden) y devuelve el status actual sin tocar nada — nunca rompe. Se
+    aprovecha esto para que la pantalla de instrucciones de transferencia sea
+    "reload-safe" sin necesitar un endpoint nuevo: además de los datos de
+    siempre, la respuesta suma `reference`/`bank`/etc. cuando corresponde, para
+    que un F5 en esa pantalla no pierda el alias/CBU/monto a transferir.
     """
     permission_classes = [AllowAny]
 
@@ -455,24 +758,38 @@ class OrderReconcileAPIView(APIView):
 
         order.refresh_from_db()
 
-        return Response(
-            {
-                "order_id": str(order.id),
-                "status": order.status,
-                "status_display": order.get_status_display(),
-                "total_amount": str(order.total_amount),
-                "currency": order.currency,
-                "items": [
-                    {
-                        "title": item.product_name,
-                        "qty": item.quantity,
-                        "unit_price": str(item.unit_price),
-                    }
-                    for item in order.order_items.all()
-                ],
-            },
-            status=status.HTTP_200_OK,
-        )
+        data = {
+            "order_id": str(order.id),
+            "status": order.status,
+            "status_display": order.get_status_display(),
+            "payment_channel": order.payment_channel,
+            "total_amount": str(order.total_amount),
+            "currency": order.currency,
+            "items": [
+                {
+                    "title": item.product_name,
+                    "qty": item.quantity,
+                    "unit_price": str(item.unit_price),
+                }
+                for item in order.order_items.all()
+            ],
+        }
+
+        if order.payment_channel == Order.PaymentChannel.TRANSFER:
+            data.update({
+                "reference": reference_code(order),
+                "transfer_discount_percent": order.transfer_discount_percent_applied,
+                "expires_in_hours": settings.TRANSFER_PENDING_EXPIRATION_HOURS,
+                "created_at": order.created_at.isoformat(),
+                "bank": {
+                    "alias": settings.TRANSFER_BANK_ALIAS,
+                    "cbu": settings.TRANSFER_BANK_CBU,
+                    "holder_name": settings.TRANSFER_BANK_HOLDER_NAME,
+                    "cuit": settings.TRANSFER_BANK_CUIT,
+                },
+            })
+
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class PaymentSuccessView(TemplateView):

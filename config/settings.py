@@ -191,6 +191,27 @@ SHIPPING_TEMP_FIXED_RATES = json.loads(
     or json.dumps({"sucursal": 5850, "domicilio": 7100})
 )
 
+# --- Transferencia bancaria (pago manual, "Opción 1") ---
+# Canal de pago alternativo a MercadoPago: el comprador transfiere a una
+# cuenta real del Grupo y el dueño confirma manualmente desde el admin
+# (`orders/admin.py::confirmar_transferencia_recibida`) — no hay ninguna API
+# de banco de por medio. Una sola cuenta para TODO el grupo (no por marca,
+# a diferencia de `Brand.transfer_discount_percent`, que sigue siendo por
+# marca). Vacío `TRANSFER_BANK_ALIAS`/`TRANSFER_BANK_CBU` = canal apagado
+# (mismo criterio "vacío = apagado" de siempre): `TransferCheckoutCreateAPIView`
+# responde 400 explicando que el medio de pago no está disponible, y el
+# frontend no debería mostrar la opción en el selector del carrito.
+TRANSFER_BANK_ALIAS = os.getenv("TRANSFER_BANK_ALIAS", "")
+TRANSFER_BANK_CBU = os.getenv("TRANSFER_BANK_CBU", "")
+TRANSFER_BANK_HOLDER_NAME = os.getenv("TRANSFER_BANK_HOLDER_NAME", "")
+TRANSFER_BANK_CUIT = os.getenv("TRANSFER_BANK_CUIT", "")
+# Ventana de gracia antes de cancelar automáticamente un pedido PENDING por
+# transferencia que nunca se confirmó (decisión del dueño: 48hs). La
+# cancelación la hace `orders/management/commands/expire_pending_transfers.py`,
+# pensado para correr por cron — no hay un campo `expires_at` en `Order`, se
+# calcula siempre contra `created_at`.
+TRANSFER_PENDING_EXPIRATION_HOURS = int(os.getenv("TRANSFER_PENDING_EXPIRATION_HOURS", "48"))
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',

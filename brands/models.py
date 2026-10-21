@@ -195,21 +195,29 @@ class Brand(models.Model):
         ),
     )
 
-    # Descuento informativo por pagar por transferencia — se muestra como
-    # cartel en la ficha de producto (precio tachado + "X% OFF por
-    # transferencia"), en el mismo lugar donde antes vivía el selector
-    # "Llevá 1/2/3". Es puramente de DISPLAY: el cobro real sigue yendo
-    # 100% por MercadoPago Checkout Pro al precio de lista, la diferencia
-    # se concilia por fuera del sistema. 0 = no se muestra el cartel.
+    # Descuento por pagar por transferencia — se muestra como cartel en la
+    # ficha de producto (precio tachado + "X% OFF por transferencia"), en el
+    # mismo lugar donde antes vivía el selector "Llevá 1/2/3". DESDE que
+    # existe el canal de pago "Transferencia bancaria" (`Order.PaymentChannel
+    # .TRANSFER`, ver `payments/services/transfer_discount.py`) este % SÍ
+    # afecta el cobro real cuando el comprador elige ese canal en el carrito
+    # — se aplica sobre el subtotal (después del descuento por cantidad,
+    # antes de sumar el envío) y se snapshotea en
+    # `Order.transfer_discount_percent_applied` al crear el pedido. El canal
+    # MercadoPago nunca lo aplica (siempre cobra precio de lista/socio). 0 =
+    # no se muestra el cartel y el checkout por transferencia no tiene
+    # descuento (pero sigue disponible si hay cuenta bancaria configurada,
+    # ver `settings.TRANSFER_BANK_ALIAS`).
     transfer_discount_percent = models.PositiveSmallIntegerField(
         "Descuento por transferencia (%)",
         default=0,
         validators=[MaxValueValidator(100)],
         help_text=(
-            "Descuento informativo que se muestra en la ficha de producto "
-            "por pagar por transferencia (cartel con precio tachado). No "
-            "afecta el cobro real del checkout, que sigue yendo 100% por "
-            "MercadoPago al precio de lista. 0 = no se muestra el cartel."
+            "Descuento que se muestra en la ficha de producto (cartel con "
+            "precio tachado) y que se cobra realmente cuando el comprador "
+            "elige pagar por transferencia bancaria en el carrito. El canal "
+            "MercadoPago nunca lo aplica. 0 = no se muestra el cartel ni se "
+            "descuenta nada en transferencia."
         ),
     )
 

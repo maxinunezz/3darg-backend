@@ -379,7 +379,7 @@ Conseguir de Correo Argentino las credenciales de **API** (HTTP Basic para `POST
 1. **`POST /api/payments/mp/checkout-pro/`** (`AllowAny`, transacción atómica):
    - Valida `brand_slug`, que el brand no sea `services`, que cada producto exista, esté disponible y tenga stock.
    - Crea `Order` en `PENDING` con `external_reference = uuid.uuid4().hex` y `OrderItem`s.
-   - Llama a `services.mercadopago.create_preference()` con `back_urls` apuntando a `FRONTEND_BASE_URL/checkout/{success|failure|pending}/?order_id=<uuid>`.
+   - Llama a `services.mercadopago.create_preference()` con `back_urls` apuntando a `FRONTEND_BASE_URL/checkout/{success|failure|pending}/?order_id=<uuid>&brand=<slug>` — el `brand` es necesario porque esas páginas viven en la ruta raíz del frontend (compartidas por todas las marcas) y lo usan para saber a qué espacio de marca volver y qué carrito limpiar (ver `ecommerce-frontend/CLAUDE.md` → "Selector de forma de pago").
    - Guarda `MercadoPagoPayment` y devuelve `init_point` (sandbox o real) al frontend.
 
 2. **`POST /api/payments/mp/webhook/`** (sin auth, lo invoca MP):
@@ -396,6 +396,77 @@ Conseguir de Correo Argentino las credenciales de **API** (HTTP Basic para `POST
    - El status se cachea en `pre_save` (`instance._old_status`) para detectar el cambio.
 
 > Si tocás `orders.Order.status`, **el signal corre**. No descontar stock manualmente desde otro lado.
+
+---
+
+## Flujo de pagos — Transferencia bancaria ("Opción 1")
+
+Canal alternativo a MercadoPago, pensado para compradores que no quieren pagar
+con tarjeta/MP: transfieren a mano a una cuenta real del Grupo y el dueño
+confirma el ingreso desde el admin — **no hay ninguna API de banco de por
+medio**. Una sola cuenta para **todo el Grupo** (no es por marca, a diferencia
+de `Brand.transfer_discount_percent`, que sí lo es). Mismo criterio stock que
+MercadoPago: nunca se descuenta mientras el pedido está `PENDING`, solo al
+pasar a `PAID`.
+
+1. **`GET /api/payments/transfer/availability/`** (`AllowAny`): le dice al
+   frontend si el canal existe hoy — `{"available": bool}`, sin exponer alias/CBU
+   (esos solo se devuelven al confirmarse el checkout). El selector de forma de
+   pago del carrito lo consulta antes de mostrar la opción "Transferencia".
+
+2. **`POST /api/payments/transfer/checkout/`** (`AllowAny`, transacción
+   atómica, mismo `CheckoutThrottle` que MercadoPago, mismo body que
+   `/mp/checkout-pro/` — `TransferCheckoutCreateSerializer` es un subclase
+   vacía de `CheckoutProCreateSerializer`):
+   - **"Vacío = apagado"**: si faltan `TRANSFER_BANK_ALIAS`/`TRANSFER_BANK_CBU`
+     en el `.env`, responde 400 ("no disponible todavía") antes de tocar la DB.
+   - Valida brand/productos/stock igual que MercadoPago, crea `Order` en
+     `PENDING` con `payment_channel = TRANSFER` y `external_reference` propio.
+   - Aplica `payments/services/transfer_discount.py::apply_transfer_discount()`
+     sobre el `total` que ya salió de `compute_cart_pricing()` (orden de
+     operaciones: precio de lista/socio → descuento por cantidad del carrito →
+     **descuento por transferencia** → + envío = total a cobrar; el umbral de
+     envío gratis se evalúa ANTES de este descuento, a propósito).
+   - Manda `send_transfer_instructions_email()` (al comprador, con alias/CBU/
+     referencia) y `send_transfer_pending_owner_email()` (al dueño, para que
+     sepa que hay un ingreso esperado).
+   - Devuelve `order_id`, `reference` (código corto para que el comprador lo
+     ponga en el concepto de la transferencia, ver `reference_code()` en
+     `payments/services/transfer_notifications.py`), `total_amount`,
+     `transfer_discount_percent`, `expires_in_hours`, y los datos de banco.
+
+3. **`POST /api/payments/orders/<uuid>/reconcile/`** (ya existente, extendido):
+   para un pedido `TRANSFER` suma `payment_channel`, `reference`, `bank`,
+   `transfer_discount_percent`, `expires_in_hours`, `created_at` a la
+   respuesta — permite que la página de instrucciones del frontend
+   (`/checkout/transfer`) sea recargable sin perder esos datos, incluso sin
+   sesión. Para este canal `reconcile_order()` nunca encuentra un pago de MP
+   que concilie (no existe ninguno), así que es un no-op seguro: solo
+   devuelve el estado actual del pedido.
+
+4. **`orders/admin.py` → acción "Confirmar transferencia recibida"**
+   (`confirmar_transferencia_recibida`): el dueño la ejecuta a mano sobre uno o
+   varios pedidos `PENDING` de canal `TRANSFER` tras revisar el movimiento en
+   el banco. Pasa `Order.status = PAID`, lo que dispara el mismo signal de
+   `orders/signals.py` que usa MercadoPago (descuenta stock, manda emails,
+   avisa a presupuestos3d/Meta CAPI) — no duplica esa lógica.
+
+5. **`python manage.py expire_pending_transfers`** (pensado para cron, cada
+   hora): cancela pedidos `TRANSFER` que quedaron `PENDING` más de
+   `TRANSFER_PENDING_EXPIRATION_HOURS` (default 48) sin confirmación — no hay
+   un campo `expires_at`, se calcula siempre contra `created_at`. No restituye
+   stock (nunca se descontó en `PENDING`), solo evita que el panel se llene de
+   pedidos zombies.
+
+**Env vars** (`.env`, "vacío = apagado" — sin esto el canal no aparece como
+disponible, pero el resto del sitio sigue funcionando):
+```
+TRANSFER_BANK_ALIAS=
+TRANSFER_BANK_CBU=
+TRANSFER_BANK_HOLDER_NAME=
+TRANSFER_BANK_CUIT=
+TRANSFER_PENDING_EXPIRATION_HOURS=48
+```
 
 ---
 

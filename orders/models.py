@@ -11,7 +11,33 @@ class Order(models.Model):
         REJECTED = "REJECTED", "Rejected"
         CANCELLED = "CANCELLED", "Cancelled"
 
+    class PaymentChannel(models.TextChoices):
+        MERCADOPAGO = "mercadopago", "Mercado Pago"
+        # Transferencia bancaria manual ("Opción 1"): el comprador transfiere
+        # a la cuenta única del Grupo (`settings.TRANSFER_BANK_*`) y el dueño
+        # confirma el ingreso a mano desde el admin — no hay API de banco de
+        # por medio, a diferencia de `MERCADOPAGO`. Ver `payments/views.py`
+        # ::TransferCheckoutCreateAPIView y `orders/admin.py`
+        # ::confirmar_transferencia_recibida.
+        TRANSFER = "transfer", "Transferencia bancaria"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Por qué medio se está pagando (o se pagó) este pedido — determina qué
+    # pasa al crear la orden (se crea una preferencia de MP vs. se mandan las
+    # instrucciones de transferencia) y qué acción de admin corresponde para
+    # confirmarlo. Default MERCADOPAGO para no romper pedidos ya existentes
+    # (todos eran de MP antes de este campo).
+    payment_channel = models.CharField(
+        max_length=20, choices=PaymentChannel.choices, default=PaymentChannel.MERCADOPAGO
+    )
+    # Snapshot del `Brand.transfer_discount_percent` vigente al momento del
+    # checkout, aplicado sobre el subtotal SOLO cuando `payment_channel ==
+    # TRANSFER` (ver `payments/services/transfer_discount.py`). Se guarda acá
+    # (en vez de recalcularlo siempre desde `Brand`) para que el total de un
+    # pedido ya creado no cambie si el dueño ajusta el % de descuento después.
+    # 0 en pedidos de MercadoPago (el descuento no aplica a ese canal).
+    transfer_discount_percent_applied = models.PositiveSmallIntegerField(default=0)
 
     brand = models.ForeignKey(
         "brands.Brand",

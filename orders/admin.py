@@ -56,11 +56,11 @@ class OrderItemInline(admin.TabularInline):
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     list_display = (
-        "id", "brand", "user", "status", "total_amount", "shipping_cost",
+        "id", "brand", "user", "status", "payment_channel", "total_amount", "shipping_cost",
         "shipping_method", "shipping_modality", "correo_argentino_tracking_number",
         "currency", "created_at",
     )
-    list_filter = ("brand", "status", "shipping_method")
+    list_filter = ("brand", "status", "payment_channel", "shipping_method")
     search_fields = (
         "id", "external_reference", "customer_email", "user__email",
         "correo_argentino_tracking_number",
@@ -71,6 +71,8 @@ class OrderAdmin(admin.ModelAdmin):
     )
     inlines = [OrderItemInline]
     actions = [
+        "confirmar_transferencia_recibida",
+        "cancelar_pedido_pendiente",
         "reintentar_alta_correo_argentino",
         "consultar_tracking_correo_argentino",
         "exportar_csv_carga_masiva",
@@ -80,6 +82,7 @@ class OrderAdmin(admin.ModelAdmin):
         (None, {
             "fields": (
                 "id", "external_reference", "brand", "user", "status",
+                "payment_channel", "transfer_discount_percent_applied",
                 "currency", "total_amount", "customer_email",
                 "created_at", "updated_at",
             ),
@@ -99,6 +102,70 @@ class OrderAdmin(admin.ModelAdmin):
             "fields": ("correo_argentino_tracking_number", "correo_argentino_sync_error"),
         }),
     )
+
+    @admin.action(description="Confirmar transferencia recibida")
+    def confirmar_transferencia_recibida(self, request, queryset):
+        """Flip manual de `status` a `PAID` para pedidos del canal
+        transferencia que todavía están `PENDING` — lo corre el dueño una
+        vez que ve el ingreso en el banco con el código de referencia
+        (`reference_code()`, ver `payments/services/transfer_notifications.py`).
+
+        No duplica nada de la lógica de confirmación: `orders/signals.py::
+        handle_order_status_change` ya reacciona a CUALQUIER transición a
+        `PAID` sin importar `payment_channel` (descuenta stock, manda el
+        mail de confirmación al comprador, avisa al dueño, dispara Meta
+        CAPI/presupuestos3d/Correo Argentino) — acá solo hace falta guardar
+        el nuevo status y dejar que el signal haga el resto.
+        """
+        afectadas = 0
+        omitidas = 0
+        for order in queryset:
+            if order.payment_channel != Order.PaymentChannel.TRANSFER or order.status != Order.Status.PENDING:
+                omitidas += 1
+                continue
+            order.status = Order.Status.PAID
+            order.save()
+            afectadas += 1
+
+        if afectadas:
+            self.message_user(
+                request,
+                f"Se confirmó el pago por transferencia de {afectadas} pedido(s) — "
+                "se descontó stock y se mandaron los mails correspondientes.",
+            )
+        if omitidas:
+            self.message_user(
+                request,
+                f"{omitidas} pedido(s) no son de transferencia pendiente — se omitieron.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(description="Cancelar pedido pendiente")
+    def cancelar_pedido_pendiente(self, request, queryset):
+        """Cancela a mano pedidos de transferencia que quedaron `PENDING`
+        (ej. el comprador avisó que no va a transferir) — no hace falta
+        restituir stock porque el canal transferencia nunca lo descuenta
+        mientras está `PENDING` (mismo criterio que MercadoPago, ver
+        `CLAUDE.md` backend). Mismo guard que la acción de arriba, invertido.
+        """
+        afectadas = 0
+        omitidas = 0
+        for order in queryset:
+            if order.payment_channel != Order.PaymentChannel.TRANSFER or order.status != Order.Status.PENDING:
+                omitidas += 1
+                continue
+            order.status = Order.Status.CANCELLED
+            order.save()
+            afectadas += 1
+
+        if afectadas:
+            self.message_user(request, f"Se cancelaron {afectadas} pedido(s) pendiente(s) de transferencia.")
+        if omitidas:
+            self.message_user(
+                request,
+                f"{omitidas} pedido(s) no son de transferencia pendiente — se omitieron.",
+                level=messages.WARNING,
+            )
 
     @admin.action(description="Reintentar alta en Correo Argentino")
     def reintentar_alta_correo_argentino(self, request, queryset):

@@ -56,3 +56,13 @@ class CheckoutProCreateSerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError("Se requiere al menos un ítem.")
         return value
+
+
+class TransferCheckoutCreateSerializer(CheckoutProCreateSerializer):
+    """Mismo contrato que el checkout de MercadoPago — el canal de pago
+    (transferencia vs. MP) no cambia qué datos de carrito/envío/dirección
+    se necesitan, solo qué pasa después de validarlos (ver
+    `payments/views.py::TransferCheckoutCreateAPIView`). Se subclasea en vez
+    de reusar el mismo serializer directo para que a futuro pueda divergir
+    (ej. si este canal necesita un campo propio) sin tocar el de MP."""
+    pass
