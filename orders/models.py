@@ -184,6 +184,14 @@ class OrderItem(models.Model):
 
     @property
     def subtotal(self):
+        # `unit_price`/`quantity` no son nullable en la DB, pero el admin
+        # igual instancia un `OrderItem()` sin guardar (la fila "molde"
+        # oculta que usa el JS de "Agregar otro" en el inline, se renderiza
+        # siempre que haya permiso de alta, sin importar `extra=0`) — ahí sí
+        # los dos valen `None`, y `None * None` rompía la página de detalle
+        # del pedido en el admin.
+        if self.unit_price is None or self.quantity is None:
+            return None
         return self.unit_price * self.quantity
 
     def __str__(self):

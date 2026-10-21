@@ -9,6 +9,7 @@ from django.http import HttpResponse
 from django.shortcuts import render
 from django.utils.html import format_html
 
+from payments.services.transfer_notifications import reference_code
 from shipping.services import correo_argentino
 from shipping.services.phone import split_ar_phone
 from .models import Order, OrderItem
@@ -50,6 +51,15 @@ class OrderItemInline(admin.TabularInline):
     readonly_fields = ("product", "product_name", "variant", "variant_label", "quantity", "unit_price", "subtotal")
     fields = ("product", "product_name", "variant", "variant_label", "quantity", "unit_price", "subtotal")
 
+    def has_add_permission(self, request, obj=None):
+        # Los items de un pedido son un snapshot de la compra (todos los
+        # campos de arriba son readonly) — nunca tuvo sentido "agregar" uno
+        # desde acá. Además de ser inútil, permitir el alta hacía que Django
+        # renderizara la fila-molde oculta del botón "Agregar otro" con un
+        # `OrderItem()` sin guardar (quantity/unit_price en None), que
+        # rompía la página de detalle al calcular `subtotal` (None * None).
+        return False
+
     def subtotal(self, obj):
         return obj.subtotal
     subtotal.short_description = "Subtotal"
@@ -58,8 +68,8 @@ class OrderItemInline(admin.TabularInline):
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     list_display = (
-        "id", "brand", "user", "status", "payment_channel", "total_amount", "shipping_cost",
-        "shipping_method", "shipping_modality", "correo_argentino_tracking_number",
+        "codigo_referencia", "id", "brand", "user", "status", "payment_channel", "total_amount",
+        "shipping_cost", "shipping_method", "shipping_modality", "correo_argentino_tracking_number",
         "tiene_comprobante", "vendido_de_mas", "currency", "created_at",
     )
     list_filter = (
@@ -123,6 +133,17 @@ class OrderAdmin(admin.ModelAdmin):
             "fields": ("oversold", "oversold_detail"),
         }),
     )
+
+    @admin.display(description="Código de referencia")
+    def codigo_referencia(self, obj):
+        """Mismo código corto (8 caracteres, mayúsculas) que ve el comprador
+        en el mail/pantalla de transferencia y que pone como concepto al
+        transferir (`reference_code()`, ver
+        `payments/services/transfer_notifications.py`) — antes solo se podía
+        ubicar el pedido buscando el UUID completo (`id`/`external_reference`)
+        a mano; con esta columna alcanza con mirar la lista y comparar contra
+        lo que el comprador mandó por mail/WhatsApp."""
+        return reference_code(obj)
 
     @admin.display(description="¿Tiene comprobante?", boolean=True)
     def tiene_comprobante(self, obj):
