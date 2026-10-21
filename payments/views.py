@@ -2,9 +2,13 @@ import os
 import uuid
 import logging
 from decimal import Decimal
+from io import BytesIO
 
 from django.conf import settings
+from django.core.files.base import ContentFile
 from django.db import transaction
+from django.utils import timezone
+from PIL import Image, UnidentifiedImageError
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -29,6 +33,7 @@ from .services.transfer_notifications import (
     reference_code,
     send_transfer_instructions_email,
     send_transfer_pending_owner_email,
+    send_transfer_receipt_uploaded_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -675,6 +680,165 @@ class TransferAvailabilityAPIView(APIView):
         return Response({"available": available})
 
 
+class TransferReceiptThrottle(SimpleRateThrottle):
+    """Por IP, igual criterio que `CheckoutThrottle` — subir un comprobante
+    no requiere sesión (puede ser compra de invitado), así que no alcanza
+    con el throttle genérico por usuario."""
+
+    scope = "transfer_receipt"
+    rate = "10/hour"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+
+_TRANSFER_RECEIPT_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
+_TRANSFER_RECEIPT_ALLOWED_CONTENT_TYPES = {
+    "image/jpeg", "image/png", "image/webp", "application/pdf",
+}
+
+
+def _compress_receipt_image(file_obj):
+    """Redimensiona (si excede `TRANSFER_RECEIPT_MAX_DIMENSION` de lado más
+    largo) y reencodea a JPEG calidad `TRANSFER_RECEIPT_JPEG_QUALITY` — una
+    foto de celular de 4-8MB suele bajar a bien por debajo de 1MB sin perder
+    legibilidad. Devuelve un `ContentFile` listo para asignar al `FileField`.
+    Los PDF no pasan por acá (Pillow no puede "comprimir" un PDF) — se
+    guardan tal cual, el cap de tamaño es la única defensa para ese caso."""
+    image = Image.open(file_obj)
+    # Corrige la orientación real de fotos de celular (EXIF) antes de
+    # redimensionar/guardar — si no, algunas fotos sacadas en vertical
+    # quedan guardadas "giradas" al perder el metadata EXIF en el proceso.
+    try:
+        from PIL import ImageOps
+        image = ImageOps.exif_transpose(image)
+    except Exception:
+        pass
+    image = image.convert("RGB")
+
+    max_dim = settings.TRANSFER_RECEIPT_MAX_DIMENSION
+    if max(image.width, image.height) > max_dim:
+        image.thumbnail((max_dim, max_dim), Image.LANCZOS)
+
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=settings.TRANSFER_RECEIPT_JPEG_QUALITY)
+    return ContentFile(buffer.getvalue(), name="comprobante.jpg")
+
+
+class TransferReceiptUploadAPIView(APIView):
+    """`POST /api/payments/orders/<uuid:order_id>/transfer-receipt/` — el
+    comprador sube una foto o PDF del comprobante desde la pantalla de
+    "pedido pendiente de transferencia" (`/checkout/transfer`), para que el
+    dueño pueda verificarlo antes de confirmar el pago a mano desde el
+    admin (ver CLAUDE.md → "Flujo de pagos — Transferencia bancaria").
+
+    `AllowAny` (igual criterio que el resto de este canal: compra de
+    invitado soportada). Re-subir REEMPLAZA el comprobante anterior — no se
+    guarda historial de versiones, decisión explícita del dueño.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [TransferReceiptThrottle]
+
+    def post(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id)
+
+        if order.payment_channel != Order.PaymentChannel.TRANSFER:
+            return Response(
+                {"detail": "Este pedido no es de pago por transferencia."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if order.status != Order.Status.PENDING:
+            return Response(
+                {"detail": "Este pedido ya no está pendiente de pago, no se puede subir un comprobante nuevo."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        uploaded = request.FILES.get("receipt")
+        if not uploaded:
+            return Response(
+                {"detail": "Falta el archivo del comprobante."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        extension = os.path.splitext(uploaded.name or "")[1].lower()
+        content_type = (uploaded.content_type or "").lower()
+        if (
+            extension not in _TRANSFER_RECEIPT_ALLOWED_EXTENSIONS
+            or content_type not in _TRANSFER_RECEIPT_ALLOWED_CONTENT_TYPES
+        ):
+            return Response(
+                {"detail": "Formato no permitido. Subí una imagen (JPG, PNG, WEBP) o un PDF."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if uploaded.size > settings.MAX_TRANSFER_RECEIPT_BYTES:
+            max_mb = settings.MAX_TRANSFER_RECEIPT_BYTES // (1024 * 1024)
+            return Response(
+                {"detail": f"El archivo es muy grande (máx. {max_mb}MB)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        is_pdf = extension == ".pdf" or content_type == "application/pdf"
+        if is_pdf:
+            file_to_save = uploaded
+        else:
+            try:
+                file_to_save = _compress_receipt_image(uploaded)
+            except (UnidentifiedImageError, OSError):
+                return Response(
+                    {"detail": "No se pudo leer la imagen. Probá con otra foto."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Guardamos el nombre del comprobante viejo (si hay) ANTES de tocar
+        # nada — lo borramos del storage recién después de confirmar que el
+        # nuevo se guardó bien. Si borráramos primero y el guardado nuevo
+        # fallara (ver try/except abajo: el storage activo puede rechazar el
+        # archivo en ese momento, ej. Cloudinary con `BadRequest: Invalid PDF
+        # file` ante un PDF corrupto, aunque haya pasado la validación de
+        # extensión/content-type de arriba), se perdería el comprobante
+        # válido anterior sin ganar uno nuevo a cambio.
+        old_receipt_name = order.transfer_receipt.name if order.transfer_receipt else None
+
+        filename = f"comprobante_{order.id}{extension if is_pdf else '.jpg'}"
+        try:
+            order.transfer_receipt.save(filename, file_to_save, save=False)
+        except Exception as e:
+            logger.error(
+                "Error guardando comprobante de transferencia de la orden %s: %s", order.id, e
+            )
+            return Response(
+                {"detail": "No pudimos guardar el comprobante. Probá con otro archivo o más tarde."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        order.transfer_receipt_uploaded_at = timezone.now()
+        order.save(update_fields=["transfer_receipt", "transfer_receipt_uploaded_at"])
+
+        if old_receipt_name:
+            try:
+                order.transfer_receipt.storage.delete(old_receipt_name)
+            except Exception as e:
+                logger.error(
+                    "Error borrando comprobante viejo de la orden %s: %s", order.id, e
+                )
+
+        receipt_url = request.build_absolute_uri(order.transfer_receipt.url)
+        try:
+            send_transfer_receipt_uploaded_email(order, receipt_url)
+        except Exception as e:
+            logger.error(
+                "Error enviando aviso de comprobante subido para orden %s: %s", order.id, e
+            )
+
+        return Response(
+            {
+                "uploaded": True,
+                "receipt_url": receipt_url,
+                "uploaded_at": order.transfer_receipt_uploaded_at.isoformat(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class MercadoPagoWebhookAPIView(APIView):
     authentication_classes = []
     permission_classes = []
@@ -724,6 +888,71 @@ class MercadoPagoWebhookAPIView(APIView):
         return Response({"ok": True}, status=status.HTTP_200_OK)
 
 
+def _reconcile_and_serialize(order):
+    """Reconcilia `order` contra MP (no-op inofensivo para transferencia,
+    ver docstring de `OrderReconcileAPIView`) y devuelve el dict de estado
+    que consumen tanto `OrderReconcileAPIView` como `OrderLookupAPIView` —
+    factorizado para no duplicar la rama `payment_channel == TRANSFER` (bank,
+    reference, receipt, etc.) entre "ya sé el order_id" (reconcile) y "lo
+    busco por código+email" (lookup)."""
+    try:
+        reconcile_order(order)
+    except Exception as e:
+        # Si MP no responde no rompemos la página de éxito: devolvemos el
+        # estado actual que tengamos en la DB.
+        logger.error("No se pudo reconciliar la orden %s: %s", order.id, e)
+
+    order.refresh_from_db()
+
+    data = {
+        "order_id": str(order.id),
+        "status": order.status,
+        "status_display": order.get_status_display(),
+        "payment_channel": order.payment_channel,
+        "total_amount": str(order.total_amount),
+        "currency": order.currency,
+        # El comprador que llega acá ya conoce este email (lo escribió él
+        # mismo al comprar) — se lo devolvemos para que el frontend pueda
+        # mostrárselo de vuelta (ej. aviso de "tu pedido anterior quedó
+        # pendiente, buscalo con este código y este email"), sin pedírselo
+        # dos veces ni mandarlo nunca por query string.
+        "customer_email": order.customer_email,
+        "items": [
+            {
+                "title": item.product_name,
+                "qty": item.quantity,
+                "unit_price": str(item.unit_price),
+            }
+            for item in order.order_items.all()
+        ],
+    }
+
+    if order.payment_channel == Order.PaymentChannel.TRANSFER:
+        data.update({
+            "reference": reference_code(order),
+            "transfer_discount_percent": order.transfer_discount_percent_applied,
+            "expires_in_hours": settings.TRANSFER_PENDING_EXPIRATION_HOURS,
+            "created_at": order.created_at.isoformat(),
+            "bank": {
+                "alias": settings.TRANSFER_BANK_ALIAS,
+                "cbu": settings.TRANSFER_BANK_CBU,
+                "holder_name": settings.TRANSFER_BANK_HOLDER_NAME,
+                "cuit": settings.TRANSFER_BANK_CUIT,
+            },
+            # Para que `/checkout/transfer` sepa (incluso después de un
+            # F5) si ya hay un comprobante subido, sin depender de que el
+            # frontend lo recuerde solo en estado local — ver
+            # `TransferReceiptUploadAPIView` más abajo.
+            "has_receipt": bool(order.transfer_receipt),
+            "receipt_uploaded_at": (
+                order.transfer_receipt_uploaded_at.isoformat()
+                if order.transfer_receipt_uploaded_at else None
+            ),
+        })
+
+    return data
+
+
 class OrderReconcileAPIView(APIView):
     """Reconcilia una orden contra MP y devuelve su estado real.
 
@@ -748,48 +977,80 @@ class OrderReconcileAPIView(APIView):
 
     def post(self, request, order_id):
         order = get_object_or_404(Order, id=order_id)
+        return Response(_reconcile_and_serialize(order), status=status.HTTP_200_OK)
 
-        try:
-            reconcile_order(order)
-        except Exception as e:
-            # Si MP no responde no rompemos la página de éxito: devolvemos el
-            # estado actual que tengamos en la DB.
-            logger.error("No se pudo reconciliar la orden %s: %s", order_id, e)
 
-        order.refresh_from_db()
+class OrderLookupThrottle(SimpleRateThrottle):
+    """Por IP, igual criterio que `CheckoutThrottle`/`TransferReceiptThrottle`
+    — sin esto, alguien podría usar este endpoint para "probar" códigos de
+    referencia (8 caracteres, no son secretos por sí solos) contra un email
+    conocido. Con el throttle, combinado con que también hace falta el email
+    exacto, el espacio de búsqueda práctico queda acotado."""
 
-        data = {
-            "order_id": str(order.id),
-            "status": order.status,
-            "status_display": order.get_status_display(),
-            "payment_channel": order.payment_channel,
-            "total_amount": str(order.total_amount),
-            "currency": order.currency,
-            "items": [
-                {
-                    "title": item.product_name,
-                    "qty": item.quantity,
-                    "unit_price": str(item.unit_price),
-                }
-                for item in order.order_items.all()
-            ],
-        }
+    scope = "order_lookup"
+    rate = "10/hour"
 
-        if order.payment_channel == Order.PaymentChannel.TRANSFER:
-            data.update({
-                "reference": reference_code(order),
-                "transfer_discount_percent": order.transfer_discount_percent_applied,
-                "expires_in_hours": settings.TRANSFER_PENDING_EXPIRATION_HOURS,
-                "created_at": order.created_at.isoformat(),
-                "bank": {
-                    "alias": settings.TRANSFER_BANK_ALIAS,
-                    "cbu": settings.TRANSFER_BANK_CBU,
-                    "holder_name": settings.TRANSFER_BANK_HOLDER_NAME,
-                    "cuit": settings.TRANSFER_BANK_CUIT,
-                },
-            })
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
 
-        return Response(data, status=status.HTTP_200_OK)
+
+class OrderLookupAPIView(APIView):
+    """`POST /api/payments/orders/lookup/` — alternativa a "Mis pedidos" para
+    compradores SIN cuenta: un pedido de invitado nunca queda asociado a
+    ningún `User` (ver `Order.user`, siempre `null` en ese caso), así que
+    "Mis pedidos" (que exige login) es un callejón sin salida para ellos.
+
+    Busca por `reference_code` (el código corto de 8 caracteres que ya se
+    muestra en mails/UI, ver `reference_code()`) + `email` exacto — las dos
+    cosas juntas, no el código solo: 8 caracteres no alcanzan para ser
+    secretos por sí mismos, pero combinados con el email exacto del
+    comprador (que un desconocido no tiene por qué saber) el lookup queda
+    razonablemente acotado. `AllowAny` + `OrderLookupThrottle` por IP, mismo
+    criterio que el resto del canal de invitado.
+
+    Reusa `_reconcile_and_serialize()` — misma respuesta que ya devuelve
+    `OrderReconcileAPIView`, así el frontend puede mostrar el resultado con
+    el mismo componente que ya tiene para esa pantalla.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [OrderLookupThrottle]
+
+    def post(self, request):
+        reference_code_input = (request.data.get("reference_code") or "").strip()
+        email = (request.data.get("email") or "").strip()
+        brand_slug = (request.data.get("brand") or "").strip()
+
+        if not reference_code_input or not email:
+            return Response(
+                {"detail": "Completá el código de pedido y el email."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # `reference_code()` es `external_reference[:8].upper()` — para
+        # buscar en sentido inverso alcanza con comparar el prefijo en
+        # minúscula contra `external_reference` (siempre hex lowercase,
+        # `uuid.uuid4().hex`). No es una columna propia: no hace falta
+        # desnormalizar nada nuevo en `Order` para este lookup.
+        code_prefix = reference_code_input.lower()
+
+        orders = Order.objects.filter(
+            customer_email__iexact=email,
+            external_reference__startswith=code_prefix,
+        )
+        if brand_slug:
+            orders = orders.filter(brand__slug=brand_slug)
+
+        order = orders.order_by("-created_at").first()
+        if not order:
+            # Mensaje genérico a propósito: no distinguir "el código está
+            # mal" de "el email está mal" evita confirmarle a quien está
+            # probando combinaciones cuál de los dos datos acertó.
+            return Response(
+                {"detail": "No encontramos un pedido con esos datos. Revisá el código y el email."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(_reconcile_and_serialize(order), status=status.HTTP_200_OK)
 
 
 class PaymentSuccessView(TemplateView):

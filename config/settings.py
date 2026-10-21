@@ -212,6 +212,32 @@ TRANSFER_BANK_CUIT = os.getenv("TRANSFER_BANK_CUIT", "")
 # calcula siempre contra `created_at`.
 TRANSFER_PENDING_EXPIRATION_HOURS = int(os.getenv("TRANSFER_PENDING_EXPIRATION_HOURS", "48"))
 
+# --- Comprobante de transferencia (foto/PDF subido por el comprador) ---
+# Ver `payments/views.py::TransferReceiptUploadAPIView` y
+# `orders/services/transfer_receipt_retention.py`. El storage (Cloudinary en
+# producción, vía `django-cloudinary-storage`) es UN SOLO pool compartido con
+# las fotos de producto/marca/CMS — a diferencia de esas, los comprobantes
+# crecen uno por pedido para siempre, nada los limpia solos salvo la
+# retención de abajo. Por eso se comprimen las imágenes al subirlas
+# (`TRANSFER_RECEIPT_MAX_DIMENSION`/`_JPEG_QUALITY`) en vez de guardarlas tal
+# cual.
+MAX_TRANSFER_RECEIPT_BYTES = 8 * 1024 * 1024       # 8MB, bajo el límite duro de Cloudinary (10MB por archivo)
+TRANSFER_RECEIPT_MAX_DIMENSION = 1600              # px, lado más largo tras comprimir (solo imágenes, no PDF)
+TRANSFER_RECEIPT_JPEG_QUALITY = 82
+# Días desde que un pedido TRANSFER pasa a PAID hasta que
+# `cleanup_old_transfer_receipts`/el Cron Job de Railway borra su
+# comprobante — ya cumplió su función (confirmar el pago) y no hace falta
+# guardarlo para siempre. "0 = apagado" (mismo criterio de siempre): no
+# borra nada, ni a mano ni por cron.
+TRANSFER_RECEIPT_RETENTION_DAYS = int(os.getenv("TRANSFER_RECEIPT_RETENTION_DAYS", "90"))
+
+# Topes de upload subidos de 2.5MB (default de Django) a 10MB — por encima
+# de `MAX_TRANSFER_RECEIPT_BYTES` a propósito, para que el error amigable en
+# español de la vista dispare ANTES que el 400 genérico de Django por
+# exceder este límite.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',

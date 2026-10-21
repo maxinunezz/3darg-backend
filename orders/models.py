@@ -106,6 +106,20 @@ class Order(models.Model):
     correo_argentino_tracking_number = models.CharField(max_length=40, blank=True)
     correo_argentino_sync_error = models.TextField(blank=True)
 
+    # Comprobante de transferencia subido por el comprador desde la pantalla
+    # de "pedido pendiente de transferencia" (ver `checkout/transfer/page.tsx`
+    # y `payments/views.py::TransferReceiptUploadAPIView`), para que el dueño
+    # pueda verificarla antes de confirmar el pago a mano desde el admin.
+    # `FileField` (no `ImageField`): también acepta PDF, y `ImageField` usa
+    # Pillow para validar que el contenido sea una imagen real, lo que
+    # rechazaría cualquier PDF subido. Re-subir un comprobante REEMPLAZA el
+    # anterior (se borra el archivo viejo del storage antes de guardar el
+    # nuevo) — no se guarda historial de versiones.
+    transfer_receipt = models.FileField(
+        upload_to="orders/transfer_receipts/", null=True, blank=True
+    )
+    transfer_receipt_uploaded_at = models.DateTimeField(null=True, blank=True)
+
     items = models.JSONField(default=list, blank=True)
 
     external_reference = models.CharField(max_length=80, unique=True, blank=True)

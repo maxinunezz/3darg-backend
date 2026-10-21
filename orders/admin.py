@@ -7,10 +7,12 @@ from django.conf import settings
 from django.contrib import admin, messages
 from django.http import HttpResponse
 from django.shortcuts import render
+from django.utils.html import format_html
 
 from shipping.services import correo_argentino
 from shipping.services.phone import split_ar_phone
 from .models import Order, OrderItem
+from .services.transfer_receipt_retention import delete_old_transfer_receipts
 from .signals import _create_correo_argentino_shipment
 
 # Encabezados EXACTOS de la plantilla de "Carga masiva" del portal web de
@@ -58,9 +60,12 @@ class OrderAdmin(admin.ModelAdmin):
     list_display = (
         "id", "brand", "user", "status", "payment_channel", "total_amount", "shipping_cost",
         "shipping_method", "shipping_modality", "correo_argentino_tracking_number",
-        "currency", "created_at",
+        "tiene_comprobante", "currency", "created_at",
     )
-    list_filter = ("brand", "status", "payment_channel", "shipping_method")
+    list_filter = (
+        "brand", "status", "payment_channel", "shipping_method",
+        ("transfer_receipt", admin.EmptyFieldListFilter),
+    )
     search_fields = (
         "id", "external_reference", "customer_email", "user__email",
         "correo_argentino_tracking_number",
@@ -68,6 +73,7 @@ class OrderAdmin(admin.ModelAdmin):
     readonly_fields = (
         "id", "external_reference", "created_at", "updated_at",
         "correo_argentino_tracking_number", "correo_argentino_sync_error",
+        "transfer_receipt_uploaded_at", "transfer_receipt_preview",
     )
     inlines = [OrderItemInline]
     actions = [
@@ -76,6 +82,7 @@ class OrderAdmin(admin.ModelAdmin):
         "reintentar_alta_correo_argentino",
         "consultar_tracking_correo_argentino",
         "exportar_csv_carga_masiva",
+        "eliminar_comprobantes_vencidos",
     ]
 
     fieldsets = (
@@ -101,7 +108,28 @@ class OrderAdmin(admin.ModelAdmin):
         ("Envío — Correo Argentino (API MiCorreo)", {
             "fields": ("correo_argentino_tracking_number", "correo_argentino_sync_error"),
         }),
+        ("Transferencia — comprobante", {
+            "fields": ("transfer_receipt", "transfer_receipt_uploaded_at", "transfer_receipt_preview"),
+        }),
     )
+
+    @admin.display(description="¿Tiene comprobante?", boolean=True)
+    def tiene_comprobante(self, obj):
+        return bool(obj.transfer_receipt)
+
+    @admin.display(description="Vista previa del comprobante")
+    def transfer_receipt_preview(self, obj):
+        if not obj.transfer_receipt:
+            return "(sin comprobante)"
+        url = obj.transfer_receipt.url
+        if url.lower().endswith(".pdf"):
+            return format_html('<a href="{}" target="_blank" rel="noopener">Ver PDF del comprobante</a>', url)
+        return format_html(
+            '<a href="{0}" target="_blank" rel="noopener">'
+            '<img src="{0}" style="max-width: 300px; max-height: 300px;" />'
+            '</a>',
+            url,
+        )
 
     @admin.action(description="Confirmar transferencia recibida")
     def confirmar_transferencia_recibida(self, request, queryset):
@@ -383,6 +411,43 @@ class OrderAdmin(admin.ModelAdmin):
                 level=messages.WARNING,
             )
         return response
+
+    @admin.action(description="Eliminar comprobantes de pedidos confirmados (más de N días)")
+    def eliminar_comprobantes_vencidos(self, request, queryset):
+        """Respaldo manual de `cleanup_old_transfer_receipts` (ver
+        `orders/services/transfer_receipt_retention.py`) — borra el
+        comprobante de los pedidos TRANSFER/PAID seleccionados que ya
+        pasaron `settings.TRANSFER_RECEIPT_RETENTION_DAYS` días desde su
+        confirmación, sin esperar al próximo disparo del Cron Job de
+        Railway. Pedidos sin comprobante, no confirmados, o confirmados
+        hace menos tiempo quedan afuera silenciosamente (es el mismo filtro
+        que usa el comando).
+        """
+        days = settings.TRANSFER_RECEIPT_RETENTION_DAYS
+        if days <= 0:
+            self.message_user(
+                request,
+                "La retención de comprobantes está desactivada "
+                "(TRANSFER_RECEIPT_RETENTION_DAYS <= 0) — no se borró nada.",
+                level=messages.WARNING,
+            )
+            return
+
+        borrados = delete_old_transfer_receipts(days=days, queryset=queryset)
+        if borrados:
+            refs = ", ".join(o.external_reference or str(o.id) for o in borrados)
+            self.message_user(
+                request,
+                f"Se eliminaron {len(borrados)} comprobante(s) de transferencia "
+                f"(pedidos: {refs}).",
+            )
+        else:
+            self.message_user(
+                request,
+                "Ninguno de los pedidos seleccionados tiene un comprobante elegible "
+                f"para borrar (TRANSFER + PAID + confirmado hace más de {days} días).",
+                level=messages.WARNING,
+            )
 
 
 @admin.register(OrderItem)

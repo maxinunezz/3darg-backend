@@ -40,6 +40,22 @@ def reference_code(order) -> str:
     return (order.external_reference or str(order.id))[:8].upper()
 
 
+def order_status_url(order) -> str:
+    """Link a la pantalla de instrucciones/estado (`/checkout/transfer` en el
+    frontend) para este pedido puntual. Es la ÚNICA forma que tiene un
+    comprador invitado (sin cuenta, no puede entrar a "Mis pedidos") de
+    volver a ver su pedido si cierra la pestaña — por eso se cuela en todos
+    los mails relacionados, no solo en el primero."""
+    # `FRONTEND_BASE_URL` no es un setting de Django (no está definido en
+    # settings.py) — se lee de env var directo, mismo patrón que
+    # orders/signals.py, products/views.py, payments/views.py y
+    # users/views.py (`getattr(settings, ...)` acá siempre caía al default
+    # vacío, dejando el link sin host en el mail).
+    base = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+    brand_slug = order.brand.slug if order.brand_id else "3darg"
+    return f"{base}/checkout/transfer?order_id={order.id}&brand={brand_slug}"
+
+
 def send_transfer_instructions_email(order):
     """Al comprador: alias/CBU, monto exacto, código de referencia y el
     aviso de las 48hs de gracia antes de que el pedido se cancele solo."""
@@ -60,6 +76,9 @@ def send_transfer_instructions_email(order):
         f"Código de referencia (poné esto en el concepto/motivo de la "
         f"transferencia): {reference_code(order)}\n\n"
         f"Tu número de orden es {order.id}.\n\n"
+        f"Guardá este link para ver el estado de tu pedido o subir el "
+        f"comprobante de la transferencia cuando quieras:\n"
+        f"{order_status_url(order)}\n\n"
         f"Importante: una vez que transfieras, vas a recibir la confirmación "
         f"por este mismo medio en cuanto verifiquemos el ingreso a mano — "
         f"puede demorar unas horas. Si no transferís dentro de las "
@@ -127,5 +146,53 @@ def send_transfer_pending_owner_email(order):
     except Exception as e:
         logger.error(
             "Error enviando aviso de pedido pendiente de transferencia para orden %s: %s",
+            order.id, e,
+        )
+
+
+def send_transfer_receipt_uploaded_email(order, receipt_url: str = ""):
+    """Al dueño: aviso de que el comprador subió un comprobante de
+    transferencia (foto o PDF) desde `/checkout/transfer` — mail NUEVO,
+    separado del de "pedido pendiente" (`send_transfer_pending_owner_email`),
+    para que el dueño distinga de un vistazo "hay un pedido esperando" de
+    "ya tengo evidencia para revisar y confirmar". Se dispara también en una
+    re-subida (reemplazo del comprobante anterior), sin distinguir primera
+    subida de reemplazo — no hace falta esa distinción para la acción que
+    tiene que tomar el dueño (revisar y confirmar desde el admin)."""
+    owner_email = _resolve_owner_email(order.brand.slug if order.brand_id else "")
+    if not owner_email:
+        return
+
+    message = (
+        f"Se subió un comprobante de transferencia para un pedido de "
+        f"{order.brand.name}.\n\n"
+        f"Orden: {order.id}\n"
+        f"Código de referencia: {reference_code(order)}\n"
+        f"Cliente: {order.customer_email or '(sin email, compra de invitado)'}\n"
+        f"Total a recibir: {order.currency} {order.total_amount}\n\n"
+    )
+    if receipt_url:
+        message += f"Ver comprobante: {receipt_url}\n\n"
+    message += (
+        f"Revisalo y, si coincide con el ingreso real en el banco, "
+        f"confirmalo desde el admin (acción 'Confirmar transferencia "
+        f"recibida' sobre esta orden) — eso descuenta el stock y manda la "
+        f"confirmación al cliente.\n"
+    )
+    try:
+        send_mail(
+            f"Comprobante recibido — pedido {reference_code(order)}",
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [owner_email],
+            fail_silently=False,
+        )
+        logger.info(
+            "Aviso de comprobante de transferencia subido enviado a %s (orden %s)",
+            owner_email, order.id,
+        )
+    except Exception as e:
+        logger.error(
+            "Error enviando aviso de comprobante de transferencia subido para orden %s: %s",
             order.id, e,
         )

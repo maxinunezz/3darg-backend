@@ -469,6 +469,111 @@ pasar a `PAID`.
    stock (nunca se descontó en `PENDING`), solo evita que el panel se llene de
    pedidos zombies.
 
+### Recuperar un pedido sin cuenta (`OrderLookupAPIView`)
+
+Un pedido de invitado (sin cuenta) nunca queda asociado a ningún `User`
+(`Order.user` queda `null` para siempre — no hay ningún signal/cron que lo
+vincule retroactivamente a una cuenta creada después con el mismo email), así
+que "Mis pedidos" (que exige login) es un callejón sin salida para ese
+comprador. Dos caminos para que lo recupere sin loguearse:
+
+1. **Link directo por mail**: `order_status_url()` en
+   `payments/services/transfer_notifications.py` manda, en todos los mails
+   del canal transferencia, un link con el `order_id` completo
+   (`/checkout/transfer?order_id=...&brand=...`) — ya resuelve el pedido sin
+   pedir nada más (`OrderReconcileAPIView`, ver arriba).
+2. **`POST /api/payments/orders/lookup/`** (`OrderLookupAPIView`, `AllowAny`,
+   throttle `10/hour` por IP vía `OrderLookupThrottle`) — para cuando el
+   comprador no tiene ese mail a mano: busca por `reference_code` (el código
+   corto de 8 caracteres, `external_reference` truncado/mayúsculas, el mismo
+   que ya se muestra en mails/UI — ver `reference_code()`) **+ `email`
+   exacto**, no por el código solo (8 caracteres no alcanzan para ser
+   secretos por sí mismos; combinados con el email del comprador, que un
+   desconocido no tiene por qué conocer, el lookup queda razonablemente
+   acotado). Acepta opcionalmente `brand` (slug) para acotar la búsqueda a
+   esa marca, mismo criterio de silos que el resto del proyecto. 404
+   genérico si no matchea (no distingue "código mal" de "email mal", para no
+   confirmarle a quien está probando combinaciones cuál de los dos acertó).
+   Reusa `_reconcile_and_serialize()` — misma respuesta que
+   `OrderReconcileAPIView` — para que el frontend (`/my-order`) renderice el
+   resultado con el mismo componente que ya tiene para `/checkout/transfer`.
+   No está limitado al canal `TRANSFER`: encuentra cualquier pedido de
+   invitado (también MercadoPago) que matchee código+email.
+
+`_reconcile_and_serialize()` también devuelve `customer_email` (el que el
+comprador ya escribió al comprar) — lo usa el frontend para el aviso
+"pedido pendiente de pago" que se muestra al volver a la home tras generar
+un pedido por transferencia (ver `ecommerce-frontend/CLAUDE.md` →
+"Aviso de pedido pendiente"), sin pedírselo de nuevo ni mandarlo nunca por
+query string.
+
+### Comprobante de transferencia (subida del comprador)
+
+Para que el dueño no dependa de otro canal (WhatsApp, etc.) para verificar
+que la transferencia se hizo, la pantalla de instrucciones
+(`/checkout/transfer` en el frontend) deja al comprador subir una foto o PDF
+del comprobante.
+
+- **`Order.transfer_receipt`** (`FileField`, no `ImageField` — así también
+  acepta PDF) + **`Order.transfer_receipt_uploaded_at`**
+  (`migrations/0010_transfer_receipt.py`).
+- **`POST /api/payments/orders/<uuid:order_id>/transfer-receipt/`**
+  (`TransferReceiptUploadAPIView`, `AllowAny`, throttle `10/hour` por IP):
+  - 400 si el pedido no es `TRANSFER` o no está `PENDING` (ya
+    pagado/rechazado/cancelado no acepta un comprobante nuevo).
+  - Valida extensión + content-type (`jpg/jpeg/png/webp/pdf`) y tamaño máx.
+    `MAX_TRANSFER_RECEIPT_BYTES` (8MB, por debajo del límite duro de
+    Cloudinary de 10MB).
+  - **Si es imagen, la comprime antes de guardarla** (Pillow: redimensiona a
+    `TRANSFER_RECEIPT_MAX_DIMENSION` lado más largo + re-encodea JPEG calidad
+    `TRANSFER_RECEIPT_JPEG_QUALITY`) — una foto de celular de 4-8MB baja a
+    bien menos de 1MB sin perder legibilidad. **Un PDF se guarda tal cual**
+    (no se puede comprimir con Pillow) — el cap de 8MB es la única defensa
+    para ese caso.
+  - **Re-subir reemplaza el comprobante anterior** (se borra el archivo viejo
+    del storage antes de guardar el nuevo) — no se guarda historial.
+  - Manda un mail NUEVO al dueño (`send_transfer_receipt_uploaded_email`,
+    separado del de "transferencia pendiente") con el link al comprobante.
+  - `OrderReconcileAPIView` suma `has_receipt`/`receipt_uploaded_at` a la
+    respuesta para pedidos `TRANSFER` — así la página del comprador sigue
+    sabiendo que ya subió uno si recarga.
+- **`orders/admin.py`**: fieldset "Transferencia — comprobante" con preview
+  (thumbnail clickeable si es imagen, link si es PDF), columna
+  `tiene_comprobante` en el listado, y filtro por `EmptyFieldListFilter`.
+- **Riesgo conocido de Cloudinary, no bloqueante**: cuentas nuevas bloquean
+  (401) la entrega de PDFs hasta habilitar "Allow delivery of PDF and ZIP
+  files" en Settings → Security del dashboard — no requiere cambio de código,
+  es una tarea pendiente del dueño una vez que `CLOUDINARY_URL` esté activo
+  en Railway.
+
+**Nota operativa de storage (no requiere código, es tarea del dueño)**: los
+comprobantes comparten el mismo cupo de Cloudinary que las fotos de
+producto/marca/CMS — a diferencia de esas, **crecen uno por pedido, para
+siempre**, si no se limpian. Dos mitigaciones ya implementadas (compresión al
+subir, ver arriba; borrado automático de comprobantes ya `PAID`, ver abajo) +
+un respaldo manual: `Settings → Assets → Bulk Delete` en el dashboard de
+Cloudinary, filtrando `Prefix: orders/transfer_receipts/` + fecha.
+
+**Borrado automático de comprobantes viejos** (`TRANSFER_RECEIPT_RETENTION_DAYS`,
+default 90 días, `0` = desactivado — mismo criterio "vacío/0 = apagado" de
+siempre): un comprobante solo existe para que el dueño confirme el pago, una
+vez confirmado (`PAID`) y pasado ese margen ya no aporta nada guardado para
+siempre.
+- `orders/services/transfer_receipt_retention.py::delete_old_transfer_receipts()`
+  — lógica compartida (usa `Order.updated_at` como aproximación de "fecha de
+  confirmación", no hace falta un campo `confirmed_at` dedicado).
+- `python manage.py cleanup_old_transfer_receipts [--days N] [--dry-run]` —
+  pensado para correr vía **Railway Cron Job** (no hay Celery/scheduler en
+  este proyecto; un cron diario no justifica sumar esa infraestructura):
+  servicio nuevo en el dashboard de Railway, mismo repo/imagen que `web`, con
+  `Cron Schedule` (ej. `0 6 * * *`) y `Start Command: python manage.py
+  cleanup_old_transfer_receipts` en vez de gunicorn — comparte las mismas env
+  vars del proyecto. **Pendiente de cargar en Railway** (no bloquea nada
+  mientras tanto, ver respaldo manual abajo).
+- Respaldo manual mientras no esté el Cron Job (o para un caso puntual): acción
+  de admin *"Eliminar comprobantes de pedidos confirmados..."* sobre la
+  selección manual en `orders/admin.py`.
+
 **Env vars** (`.env`, "vacío = apagado" — sin esto el canal no aparece como
 disponible, pero el resto del sitio sigue funcionando):
 ```
@@ -477,6 +582,7 @@ TRANSFER_BANK_CBU=
 TRANSFER_BANK_HOLDER_NAME=
 TRANSFER_BANK_CUIT=
 TRANSFER_PENDING_EXPIRATION_HOURS=48
+TRANSFER_RECEIPT_RETENTION_DAYS=90   # 0 = no borra comprobantes nunca
 ```
 
 ---
