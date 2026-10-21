@@ -292,14 +292,7 @@ class OrderAdmin(admin.ModelAdmin):
         resultados = []
         for order in orders:
             eventos = correo_argentino.get_tracking(order.correo_argentino_tracking_number)
-            ultimo_estado = None
-            if eventos:
-                ultimo = eventos[-1]
-                if isinstance(ultimo, dict):
-                    ultimo_estado = (
-                        ultimo.get("status") or ultimo.get("lastStatus")
-                        or ultimo.get("description") or ultimo.get("event") or ultimo.get("state")
-                    )
+            ultimo_estado = correo_argentino.extract_last_status(eventos)
             resultados.append({
                 "order": order,
                 "tracking_number": order.correo_argentino_tracking_number,

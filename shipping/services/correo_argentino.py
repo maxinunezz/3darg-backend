@@ -399,3 +399,33 @@ def get_tracking(shipping_id: str) -> list[dict] | None:
     except (ValueError, KeyError, TypeError) as e:
         logger.error("Correo Argentino: respuesta inesperada al consultar tracking: %s", e)
         return None
+
+
+def extract_last_status(eventos: list[dict] | None) -> str | None:
+    """Texto del ÚLTIMO evento (`eventos[-1]`) de una respuesta de
+    `get_tracking()`. La API real no documenta un nombre de campo único
+    garantizado para el estado, así que se prueban varios alias conocidos en
+    orden (`status`/`lastStatus`/`description`/`event`/`state`) — misma
+    cadena que ya usaba `orders/admin.py::consultar_tracking_correo_argentino`
+    antes de factorizarse acá. `None` si no hay eventos. Separada de
+    `last_tracking_status()` para que un caller que YA tiene los eventos
+    (ej. el admin, que también necesita el JSON crudo) no tenga que pedirlos
+    de nuevo por red."""
+    if not eventos:
+        return None
+    ultimo = eventos[-1]
+    if not isinstance(ultimo, dict):
+        return None
+    return (
+        ultimo.get("status") or ultimo.get("lastStatus")
+        or ultimo.get("description") or ultimo.get("event") or ultimo.get("state")
+    )
+
+
+def last_tracking_status(shipping_id: str) -> str | None:
+    """Envoltorio de `get_tracking()` + `extract_last_status()` para un
+    caller que solo necesita el texto del último estado (no el JSON crudo de
+    eventos) — ej. mostrárselo al comprador en `/my-order`. Devuelve `None`
+    si no hay eventos o `get_tracking()` ya devolvió `None` (sin
+    credenciales, error de red, etc.) — nunca lanza excepción."""
+    return extract_last_status(get_tracking(shipping_id))

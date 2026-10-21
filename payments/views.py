@@ -23,6 +23,7 @@ from orders.models import Order, OrderItem
 from products.models import Product, ProductVariant
 from products.services.combo_pricing import compute_unit_prices
 from cart.services.cart_discount import compute_cart_pricing
+from shipping.services import correo_argentino
 from shipping.services.quote import cheapest_price, get_quotes, select_methods
 from .models import MercadoPagoPayment
 from .serializers import CheckoutProCreateSerializer, TransferCheckoutCreateSerializer
@@ -930,6 +931,28 @@ def _reconcile_and_serialize(order):
                 if order.transfer_receipt_uploaded_at else None
             ),
         })
+
+    # Estado de envío de Correo Argentino — solo tiene sentido mostrarlo una
+    # vez que el pedido está confirmado (`PAID`) y realmente se dio de alta
+    # un envío con ellos (ver `orders/signals.py::_create_correo_argentino_shipment`).
+    # Pedido de negocio: en `/my-order`, un pedido confirmado pasa de
+    # "check verde" a mostrar además este estado real de envío. No-op
+    # (nunca lanza, nunca bloquea la respuesta) por el mismo criterio que
+    # el resto de las integraciones de terceros del proyecto.
+    data["shipping_status"] = None
+    if (
+        order.status == Order.Status.PAID
+        and order.shipping_method == "correoargentino"
+        and order.correo_argentino_tracking_number
+    ):
+        try:
+            data["shipping_status"] = correo_argentino.last_tracking_status(
+                order.correo_argentino_tracking_number
+            )
+        except Exception as e:
+            logger.error(
+                "No se pudo consultar el estado de envío de la orden %s: %s", order.id, e
+            )
 
     return data
 
