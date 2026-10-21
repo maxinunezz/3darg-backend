@@ -147,21 +147,14 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        stock_errors = []
-        for it in items_data:
-            product = products_by_id[it["product_id"]]
-            variant = variants_by_id.get(it.get("variant_id"))
-            available_stock = variant.stock if variant is not None else product.stock
-            if available_stock < it["quantity"]:
-                label = f"{product.name} ({variant.label})" if variant is not None else product.name
-                stock_errors.append(
-                    f"'{label}': stock insuficiente ({available_stock} disponible(s))"
-                )
-        if stock_errors:
-            return Response(
-                {"detail": "; ".join(stock_errors)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Regla de negocio (pedido del dueño, 2026-10-21): el stock es
+        # información interna, no un tope para el comprador — se puede pedir
+        # cualquier cantidad aunque supere el stock cargado. Lo que antes era
+        # un bloqueo acá (`stock_errors` / 400) se eliminó a propósito: ya no
+        # se valida disponibilidad en el checkout. El stock queda en negativo
+        # recién al CONFIRMARSE el pago (`orders/signals.py::_decrement_stock`),
+        # que es también donde se dispara el aviso al dueño — acá no hace
+        # falta saber nada de stock todavía.
 
         # Se resuelven TODOS los precios juntos en una sola pasada: el
         # descuento por CANTIDAD TOTAL de unidades del carrito
@@ -493,21 +486,9 @@ class TransferCheckoutCreateAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        stock_errors = []
-        for it in items_data:
-            product = products_by_id[it["product_id"]]
-            variant = variants_by_id.get(it.get("variant_id"))
-            available_stock = variant.stock if variant is not None else product.stock
-            if available_stock < it["quantity"]:
-                label = f"{product.name} ({variant.label})" if variant is not None else product.name
-                stock_errors.append(
-                    f"'{label}': stock insuficiente ({available_stock} disponible(s))"
-                )
-        if stock_errors:
-            return Response(
-                {"detail": "; ".join(stock_errors)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Ver nota equivalente en `MercadoPagoCheckoutProCreateAPIView` — el
+        # stock ya no bloquea el checkout en ningún canal, es solo
+        # información interna (pedido del dueño, 2026-10-21).
 
         list_prices = compute_unit_prices(
             user,

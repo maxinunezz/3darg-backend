@@ -126,6 +126,23 @@ class Order(models.Model):
 
     customer_email = models.EmailField(blank=True)
 
+    # Regla de negocio (pedido del dueño, 2026-10-21): el stock es
+    # información interna, nunca bloquea una compra — el comprador puede
+    # pedir cualquier cantidad. Si al confirmarse el pago la cantidad
+    # comprada supera el stock disponible en ese momento, el stock del
+    # producto/variante queda en negativo (`orders/signals.py::_decrement_stock`)
+    # y acá se guarda la marca + el detalle, para que quede visible en el
+    # admin sin tener que adivinar por qué un producto quedó en negativo.
+    oversold = models.BooleanField(
+        default=False,
+        help_text="Se marca sola al confirmarse el pago si algún ítem se vendió por encima del stock disponible — ver 'Detalle de stock vendido de más'.",
+    )
+    oversold_detail = models.TextField(
+        blank=True,
+        default="",
+        help_text="Detalle de qué producto/variante se vendió de más y por cuánto quedó el stock en negativo.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

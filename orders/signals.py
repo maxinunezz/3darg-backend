@@ -66,28 +66,56 @@ def _decrement_stock(order):
     # una variante puntual, el stock que se mueve es el de ESA variante, no
     # el del Product (que puede tener otras variantes con su propio stock
     # intacto). Sin variante (producto sin talles), comportamiento histórico.
+    #
+    # Regla de negocio (pedido del dueño, 2026-10-21): el stock es
+    # información interna, no un tope para el comprador — ya no se bloquea
+    # en ningún checkout (ver `payments/views.py`). Por eso acá YA NO se
+    # clampea a 0: si se vendió más de lo disponible, el stock queda
+    # negativo a propósito (es la señal visible en el admin de que se
+    # vendió de más) y se junta el detalle para flaggear la orden + avisar
+    # al dueño por mail.
+    oversold_lines = []
     with transaction.atomic():
         for item in order.order_items.all():
             if item.variant_id:
                 variant = ProductVariant.objects.select_for_update().get(pk=item.variant_id)
-                new_stock = max(variant.stock - item.quantity, 0)
+                available_before = variant.stock
+                new_stock = variant.stock - item.quantity
                 variant.stock = new_stock
                 variant.save(update_fields=["stock"])
                 logger.info(
                     "Stock descontado: variant=%s qty=-%s stock_actual=%s",
                     variant.sku or variant.pk, item.quantity, new_stock,
                 )
+                if item.quantity > available_before:
+                    label = item.variant_label or variant.sku or f"variante #{variant.pk}"
+                    oversold_lines.append(
+                        f"- {item.product_name} ({label}): pedido {item.quantity}, "
+                        f"stock disponible era {available_before} → quedó en {new_stock}"
+                    )
                 continue
             if not item.product_id:
                 continue
             product = Product.objects.select_for_update().get(pk=item.product_id)
-            new_stock = max(product.stock - item.quantity, 0)
+            available_before = product.stock
+            new_stock = product.stock - item.quantity
             product.stock = new_stock
             product.save(update_fields=["stock"])
             logger.info(
                 "Stock descontado: product=%s qty=-%s stock_actual=%s",
                 product.slug, item.quantity, new_stock,
             )
+            if item.quantity > available_before:
+                oversold_lines.append(
+                    f"- {item.product_name}: pedido {item.quantity}, "
+                    f"stock disponible era {available_before} → quedó en {new_stock}"
+                )
+
+    if oversold_lines:
+        order.oversold = True
+        order.oversold_detail = "\n".join(oversold_lines)
+        order.save(update_fields=["oversold", "oversold_detail"])
+        _send_oversold_notification_email(order, oversold_lines)
 
 
 def _restore_stock(order):
@@ -111,6 +139,15 @@ def _restore_stock(order):
                 "Stock restituido: product=%s qty=+%s stock_actual=%s",
                 product.slug, item.quantity, product.stock,
             )
+
+    # El stock ya vuelve a su valor previo a la venta — si esta orden había
+    # quedado marcada como "vendida de más", ese detalle ya no aplica (se
+    # restituyó todo), así que se limpia para no dejar una marca engañosa en
+    # el admin sobre un pedido que terminó cancelado/rechazado.
+    if order.oversold:
+        order.oversold = False
+        order.oversold_detail = ""
+        order.save(update_fields=["oversold", "oversold_detail"])
 
 
 def _trigger_bambuddy_print(order):
@@ -396,6 +433,36 @@ def _resolve_owner_email(brand_slug: str) -> str:
         if brand_email:
             return brand_email
     return getattr(settings, "CONTACT_EMAIL", "3darg1@gmail.com")
+
+
+def _send_oversold_notification_email(order, oversold_lines):
+    """Avisa al dueño que un pedido se confirmó vendiendo más unidades de las
+    que había en stock — el stock de ese producto/variante quedó en negativo
+    a propósito (ver comentario en `_decrement_stock`), y este mail es la
+    forma de que el dueño se entere sin tener que revisar el admin a mano."""
+    owner_email = _resolve_owner_email(order.brand.slug if order.brand_id else "")
+    if not owner_email:
+        return
+
+    subject = (
+        f"⚠️ Pedido vendido por encima del stock — "
+        f"{order.brand.name if order.brand_id else ''} — orden {order.id}"
+    )
+    message = (
+        f"El pedido {order.id} ({order.brand.name if order.brand_id else 'sin marca'}) se "
+        f"confirmó con más unidades de las que había disponibles en stock. El stock quedó en "
+        f"negativo — es la señal de que hay que reponer o producir más antes de seguir "
+        f"vendiendo.\n\n"
+        f"Detalle:\n" + "\n".join(oversold_lines) + "\n\n"
+        f"Cliente: {order.customer_email or '(sin email, compra de invitado)'}\n"
+        f"Revisalo en el admin: la ficha de la orden está marcada como 'Vendido de más', y el "
+        f"producto/variante en cuestión va a mostrar stock negativo.\n"
+    )
+    try:
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [owner_email], fail_silently=False)
+        logger.info("Aviso de venta por encima del stock enviado a %s (orden %s)", owner_email, order.id)
+    except Exception as e:
+        logger.error("Error enviando aviso de oversold para orden %s: %s", order.id, e)
 
 
 def _send_owner_notification_email(order):

@@ -60,10 +60,10 @@ class OrderAdmin(admin.ModelAdmin):
     list_display = (
         "id", "brand", "user", "status", "payment_channel", "total_amount", "shipping_cost",
         "shipping_method", "shipping_modality", "correo_argentino_tracking_number",
-        "tiene_comprobante", "currency", "created_at",
+        "tiene_comprobante", "vendido_de_mas", "currency", "created_at",
     )
     list_filter = (
-        "brand", "status", "payment_channel", "shipping_method",
+        "brand", "status", "payment_channel", "shipping_method", "oversold",
         ("transfer_receipt", admin.EmptyFieldListFilter),
     )
     search_fields = (
@@ -74,6 +74,7 @@ class OrderAdmin(admin.ModelAdmin):
         "id", "external_reference", "created_at", "updated_at",
         "correo_argentino_tracking_number", "correo_argentino_sync_error",
         "transfer_receipt_uploaded_at", "transfer_receipt_preview",
+        "oversold", "oversold_detail",
     )
     inlines = [OrderItemInline]
     actions = [
@@ -111,11 +112,25 @@ class OrderAdmin(admin.ModelAdmin):
         ("Transferencia — comprobante", {
             "fields": ("transfer_receipt", "transfer_receipt_uploaded_at", "transfer_receipt_preview"),
         }),
+        ("Alerta — vendido por encima del stock", {
+            "description": (
+                "El stock es información interna: nunca bloquea una compra, así que un comprador "
+                "puede pedir más unidades de las que hay disponibles. Si eso pasó acá, el stock del "
+                "producto/variante involucrado quedó en negativo a propósito — es la señal de que "
+                "hay que reponer o producir más. Estos dos campos los completa solo el sistema al "
+                "confirmarse el pago, no se editan a mano."
+            ),
+            "fields": ("oversold", "oversold_detail"),
+        }),
     )
 
     @admin.display(description="¿Tiene comprobante?", boolean=True)
     def tiene_comprobante(self, obj):
         return bool(obj.transfer_receipt)
+
+    @admin.display(description="¿Vendido de más?", boolean=True)
+    def vendido_de_mas(self, obj):
+        return obj.oversold
 
     @admin.display(description="Vista previa del comprobante")
     def transfer_receipt_preview(self, obj):

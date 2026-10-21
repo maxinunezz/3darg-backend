@@ -257,13 +257,23 @@ class ProductVariantAdmin(admin.ModelAdmin):
     """
 
     list_display = [
-        "__str__", "product", "order", "sku", "price", "stock", "cost_template", "is_available",
+        "__str__", "product", "order", "sku", "price", "stock", "vendido_de_mas",
+        "cost_template", "is_available",
     ]
     list_filter = ["cost_template", "is_available", "product__brand"]
     search_fields = ["sku", "product__name", "product__sku", "color", "size"]
     list_editable = ["order", "price", "stock", "is_available"]
     autocomplete_fields = ["product", "cost_template"]
     actions = ["asignar_cost_template"]
+
+    @admin.display(description="¿Vendida de más?", boolean=True)
+    def vendido_de_mas(self, obj):
+        # El stock es información interna, nunca bloquea una compra — si se
+        # vendió más de lo disponible, esta variante queda con stock
+        # negativo a propósito (ver orders/signals.py::_decrement_stock).
+        # Este campo es solo una señal visual de "revisar/reponer", no se
+        # edita a mano.
+        return obj.stock < 0
 
     @admin.action(description="Asignar template de costo a las variantes seleccionadas")
     def asignar_cost_template(self, request, queryset):
@@ -351,7 +361,7 @@ class ProductAdmin(admin.ModelAdmin):
 
     list_display = [
         "name", "brand", "sku", "price", "ml_price", "member_discount_percent", "members_only",
-        "stock", "is_available", "is_available_web", "is_available_ml", "is_featured",
+        "stock", "vendido_de_mas", "is_available", "is_available_web", "is_available_ml", "is_featured",
     ]
     list_filter = [
         "brand", "category", "members_only", "is_featured",
@@ -433,6 +443,17 @@ class ProductAdmin(admin.ModelAdmin):
         )
 
         return format_html("{}{}", resumen, desglose)
+
+    @admin.display(description="¿Vendido de más?", boolean=True)
+    def vendido_de_mas(self, obj):
+        # El stock es información interna, nunca bloquea una compra — si se
+        # vendió más de lo disponible, este producto queda con stock
+        # negativo a propósito (ver orders/signals.py::_decrement_stock).
+        # Este campo es solo una señal visual de "revisar/reponer", no se
+        # edita a mano. En productos con variantes (Fase 2), el stock que
+        # de verdad se vende es el de cada ProductVariant, no el de acá
+        # (ver "vendido de más" en el admin de Variantes de producto).
+        return obj.stock < 0
 
     @admin.display(description="Resumen Mercado Libre")
     def ml_resumen(self, obj):
@@ -516,7 +537,13 @@ class ProductAdmin(admin.ModelAdmin):
                 "es lo que usa el sync de precios de presupuestos3d para saber "
                 "a quién aplicarle un presupuesto. Por ahora el precio/stock "
                 "que de verdad se vende sigue siendo el de arriba, no el de "
-                "la variante (eso cambia en una fase siguiente)."
+                "la variante (eso cambia en una fase siguiente). "
+                "El stock es información interna — nunca bloquea una compra, un "
+                "comprador puede pedir cualquier cantidad. Si se confirma un pago "
+                "con más unidades de las disponibles, el stock queda EN NEGATIVO "
+                "a propósito (ver columna '¿Vendido de más?' en el listado): es la "
+                "señal de que hay que reponer/producir más, no un error ni algo "
+                "para corregir a mano."
             ),
         }),
         ("Página web — todo lo que necesita este canal", {
