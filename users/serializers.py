@@ -124,6 +124,12 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             "id", "email", "username", "first_name", "last_name", "phone",
             "registered_brand", "date_joined", "has_usable_password", "current_password",
+            # Dirección de envío preferida (ver `users/models.py::User`) — todos
+            # opcionales, se guardan desde "Mis datos" del frontend y se leen
+            # para autocompletar el carrito (`ShippingEstimator`).
+            "shipping_modality", "shipping_province", "shipping_agency_id",
+            "shipping_street", "shipping_street_number", "shipping_floor",
+            "shipping_department", "shipping_city", "shipping_postal_code",
         ]
         read_only_fields = ["id", "registered_brand", "date_joined", "has_usable_password"]
 
