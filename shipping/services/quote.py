@@ -147,7 +147,21 @@ def get_quotes(*, postal_code: str, items: list[tuple], declared_value: Decimal 
     for modality, delivered_type in _MODALITIES:
         live_entry = None
         if live_rates:
-            live_entry = next((r for r in live_rates if r.get("deliveredType") == delivered_type), None)
+            # `/rates` real devuelve varios `productType` por `deliveredType`
+            # (confirmado contra la cuenta real: "CP" Clásico Y "EP" Expreso
+            # para sucursal Y domicilio, en ese orden) — filtrar también por
+            # `CORREO_ARGENTINO_PRODUCT_TYPE` para no quedar a merced del
+            # orden en que la API los liste (si alguna vez cambia, elegir el
+            # primero por `deliveredType` podría terminar cotizando Expreso,
+            # más caro, en vez del Clásico configurado).
+            live_entry = next(
+                (
+                    r for r in live_rates
+                    if r.get("deliveredType") == delivered_type
+                    and r.get("productType") == settings.CORREO_ARGENTINO_PRODUCT_TYPE
+                ),
+                None,
+            )
 
         if live_entry and live_entry.get("price") is not None:
             quotes.append({
