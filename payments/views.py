@@ -301,6 +301,20 @@ class MercadoPagoCheckoutProCreateAPIView(APIView):
                     {"detail": "Falta completar la dirección para el envío a domicilio."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+        elif shipping_method == "local" and shipping_modality == "retiro":
+            # Retiro en el local del dueño — no hay courier ni sucursal de
+            # por medio, así que no se exige dirección ni provincia, solo
+            # un contacto para coordinar el retiro (ver
+            # `shipping/services/quote.py::local_pickup_address()`).
+            missing_contact = [
+                field for field in ("shipping_full_name", "shipping_phone")
+                if not address_fields[field]
+            ]
+            if missing_contact:
+                return Response(
+                    {"detail": "Falta completar nombre y teléfono para retirar en el local."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         if shipping_cost > 0:
             items_for_mp.append({
@@ -574,6 +588,17 @@ class TransferCheckoutCreateAPIView(APIView):
             if missing_address or not province:
                 return Response(
                     {"detail": "Falta completar la dirección para el envío a domicilio."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif shipping_method == "local" and shipping_modality == "retiro":
+            # Ver comentario equivalente en `MercadoPagoCheckoutProCreateAPIView`.
+            missing_contact = [
+                field for field in ("shipping_full_name", "shipping_phone")
+                if not address_fields[field]
+            ]
+            if missing_contact:
+                return Response(
+                    {"detail": "Falta completar nombre y teléfono para retirar en el local."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 

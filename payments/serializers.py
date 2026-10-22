@@ -22,17 +22,19 @@ class CheckoutProCreateSerializer(serializers.Serializer):
     province = serializers.CharField(required=False, allow_blank=True, max_length=2)
     # Id del método elegido en el selector del carrito (ver
     # `shipping/services/quote.py::select_methods()`, que siempre devuelve
-    # exactamente estas dos entradas). Se exige uno de los dos valores reales
-    # — antes era un `CharField` libre y opcional, lo que permitía mandar
-    # cualquier string (o directamente nada) para esquivar la validación de
-    # dirección de `MercadoPagoCheckoutProCreateAPIView` y crear pedidos sin
-    # dirección, incluso en la rama de envío gratis. El frontend siempre
-    # manda uno de los dos ids reales (`shipping-estimator.tsx` tiene
-    # "sucursal" seleccionado por default) salvo que la cotización todavía
-    # esté cargando o haya fallado — ese caso ahora lo bloquea `canCheckout`
-    # en el frontend antes de llegar a pegarle a este endpoint.
+    # exactamente estas tres entradas — las dos de Correo Argentino más
+    # "local_retiro", retiro en persona en el local del dueño, siempre $0).
+    # Se exige uno de los tres valores reales — antes era un `CharField`
+    # libre y opcional, lo que permitía mandar cualquier string (o
+    # directamente nada) para esquivar la validación de dirección de
+    # `MercadoPagoCheckoutProCreateAPIView` y crear pedidos sin dirección,
+    # incluso en la rama de envío gratis. El frontend siempre manda uno de
+    # los tres ids reales (`shipping-estimator.tsx` tiene "sucursal"
+    # seleccionado por default) salvo que la cotización todavía esté
+    # cargando o haya fallado — ese caso ahora lo bloquea `canCheckout` en el
+    # frontend antes de llegar a pegarle a este endpoint.
     shipping_method_id = serializers.ChoiceField(
-        choices=["correoargentino_sucursal", "correoargentino_domicilio"],
+        choices=["correoargentino_sucursal", "correoargentino_domicilio", "local_retiro"],
         error_messages={"invalid_choice": "Elegí un método de envío válido."},
     )
 

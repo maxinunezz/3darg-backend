@@ -40,6 +40,39 @@ _METHOD_LABELS = {
     ("correoargentino", "domicilio"): "Correo Argentino a domicilio",
 }
 
+# Tercera modalidad del selector del carrito, agregada aparte de las dos de
+# Correo Argentino de arriba: retiro en persona en el local/taller del
+# dueño, sin courier de por medio y por lo tanto SIEMPRE $0 — no es una
+# cotización (no hay nada que calcular), por eso vive como una entrada fija
+# en `select_methods()` en vez de pasar por `get_quotes()`/`_MODALITIES`.
+# El prefijo del `id` ("local", no "correoargentino") es a propósito: así
+# `shipping_method_id.partition("_")` en `payments/views.py` cae en una rama
+# de validación de dirección propia (solo nombre+teléfono, sin provincia/
+# sucursal/dirección) en vez de colarse en alguna de las ramas de Correo
+# Argentino.
+_LOCAL_PICKUP_CARRIER_ID = "local"
+_LOCAL_PICKUP_MODALITY = "retiro"
+_LOCAL_PICKUP_METHOD_ID = f"{_LOCAL_PICKUP_CARRIER_ID}_{_LOCAL_PICKUP_MODALITY}"
+
+
+def local_pickup_address() -> dict:
+    """Dirección fija donde el comprador retira en persona — reusa a
+    propósito los mismos datos de remitente ya cargados para Correo
+    Argentino (`CORREO_ARGENTINO_SENDER_*`, ver CLAUDE.md → "Envíos"): es la
+    misma dirección real de despacho/local del dueño, no hace falta
+    duplicarla en una env var nueva. Puramente informativo para mostrarle al
+    comprador dónde ir — no participa en ningún envío real, no se manda a
+    ninguna API de courier.
+    """
+    return {
+        "name": settings.CORREO_ARGENTINO_SENDER_NAME,
+        "street": settings.CORREO_ARGENTINO_SENDER_STREET,
+        "street_number": settings.CORREO_ARGENTINO_SENDER_STREET_NUMBER,
+        "city": settings.CORREO_ARGENTINO_SENDER_CITY,
+        "province": settings.CORREO_ARGENTINO_SENDER_PROVINCE,
+        "postal_code": settings.CORREO_ARGENTINO_SENDER_ZIP,
+    }
+
 # (modalidad interna, "deliveredType" real de la API) — "S"/"D" confirmado
 # literal en la doc ("D" (no "S") envío a domicilio, "S" envío a sucursal).
 _MODALITIES = (("sucursal", "S"), ("domicilio", "D"))
@@ -210,7 +243,11 @@ def cheapest_price(quotes: list[dict]) -> Decimal:
 def select_methods(quotes: list[dict]) -> list[dict]:
     """Traduce las cotizaciones de `get_quotes()` a los métodos que el
     checkout deja elegir al comprador, con el `id` estable que viaja como
-    `shipping_method_id` (ej. "correoargentino_sucursal")."""
+    `shipping_method_id` (ej. "correoargentino_sucursal"). Siempre suma,
+    además, la entrada fija de retiro en el local (ver
+    `_LOCAL_PICKUP_METHOD_ID` arriba) — no depende de ninguna cotización, así
+    que aparece sin importar si `quotes` viene vacía o con las dos entradas
+    de Correo Argentino."""
     methods = []
     for q in quotes:
         carrier_id = "correoargentino"
@@ -224,6 +261,16 @@ def select_methods(quotes: list[dict]) -> list[dict]:
             "delivery_days": q["delivery_days"],
             "is_fallback": q["is_fallback"],
         })
+    methods.append({
+        "id": _LOCAL_PICKUP_METHOD_ID,
+        "carrier": "Retiro en el local",
+        "modality": _LOCAL_PICKUP_MODALITY,
+        "label": "Retirar en el local (gratis)",
+        "price": 0.0,
+        "delivery_days": None,
+        "is_fallback": False,
+        "address": local_pickup_address(),
+    })
     return methods
 
 
