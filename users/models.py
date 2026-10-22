@@ -24,8 +24,9 @@ class User(AbstractUser):
     # tiene ninguno cargado y el checkout sigue funcionando igual que
     # siempre (invitado o logueado sin preferencia guardada).
     class ShippingModality(models.TextChoices):
-        SUCURSAL = "sucursal", "Retirar en sucursal"
+        SUCURSAL = "sucursal", "Retirar en sucursal Correo Argentino"
         DOMICILIO = "domicilio", "Envío a domicilio"
+        LOCAL = "local", "Retirar en el local"
 
     shipping_modality = models.CharField(
         max_length=20, choices=ShippingModality.choices, blank=True
