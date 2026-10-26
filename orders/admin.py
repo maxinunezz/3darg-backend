@@ -14,7 +14,7 @@ from shipping.services import correo_argentino
 from shipping.services.phone import split_ar_phone
 from .models import Order, OrderItem
 from .services.transfer_receipt_retention import delete_old_transfer_receipts
-from .signals import _create_correo_argentino_shipment
+from .signals import _create_correo_argentino_shipment, _notify_presupuestos3d
 
 # Encabezados EXACTOS de la plantilla de "Carga masiva" del portal web de
 # MiCorreo (Nuevo envío → Paquetería → Masivo → "Plantilla de datos",
@@ -66,6 +66,25 @@ class TieneErrorCorreoArgentinoFilter(admin.SimpleListFilter):
         return queryset
 
 
+class TienePresupuestos3dErrorFilter(admin.SimpleListFilter):
+    """Mismo criterio que `TieneErrorCorreoArgentinoFilter`, para el aviso de
+    venta a presupuestos3d — sin esto, un fallo (token vencido, presupuestos3d
+    caído al momento del pago, etc.) quedaba solo en los logs/Sentry, sin
+    forma de encontrar esas órdenes desde el admin."""
+    title = "Aviso a presupuestos3d con error"
+    parameter_name = "tiene_error_presupuestos3d"
+
+    def lookups(self, request, model_admin):
+        return (("si", "Sí, con error"), ("no", "No / sin error"))
+
+    def queryset(self, request, queryset):
+        if self.value() == "si":
+            return queryset.exclude(presupuestos3d_sync_error="")
+        if self.value() == "no":
+            return queryset.filter(presupuestos3d_sync_error="")
+        return queryset
+
+
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 0
@@ -91,12 +110,13 @@ class OrderAdmin(admin.ModelAdmin):
     list_display = (
         "codigo_referencia", "id", "brand", "user", "status", "payment_channel", "total_amount",
         "shipping_cost", "shipping_method", "shipping_modality", "estado_envio_correo_argentino",
-        "tiene_comprobante", "vendido_de_mas", "currency", "created_at",
+        "estado_aviso_presupuestos3d", "tiene_comprobante", "vendido_de_mas", "currency", "created_at",
     )
     list_filter = (
         "brand", "status", "payment_channel", "shipping_method", "oversold",
         ("transfer_receipt", admin.EmptyFieldListFilter),
         TieneErrorCorreoArgentinoFilter,
+        TienePresupuestos3dErrorFilter,
     )
     search_fields = (
         "id", "external_reference", "customer_email", "user__email",
@@ -105,6 +125,7 @@ class OrderAdmin(admin.ModelAdmin):
     readonly_fields = (
         "id", "external_reference", "created_at", "updated_at",
         "correo_argentino_tracking_number", "correo_argentino_sync_error_detalle",
+        "presupuestos3d_sync_error_detalle",
         "transfer_receipt_uploaded_at", "transfer_receipt_preview",
         "oversold", "oversold_detail",
     )
@@ -114,6 +135,7 @@ class OrderAdmin(admin.ModelAdmin):
         "cancelar_pedido_pendiente",
         "reintentar_alta_correo_argentino",
         "consultar_tracking_correo_argentino",
+        "reintentar_aviso_presupuestos3d",
         "exportar_csv_carga_masiva",
         "eliminar_comprobantes_vencidos",
     ]
@@ -140,6 +162,16 @@ class OrderAdmin(admin.ModelAdmin):
         }),
         ("Envío — Correo Argentino (API MiCorreo)", {
             "fields": ("correo_argentino_tracking_number", "correo_argentino_sync_error_detalle"),
+        }),
+        ("presupuestos3d — aviso de venta", {
+            "description": (
+                "Avisa al sistema interno de gestión (presupuestos3d) que esta venta se pagó, "
+                "para que el dueño la revise y la cargue a mano como Presupuesto si corresponde "
+                "poner a producir. Un error acá (token vencido, presupuestos3d caído en ese "
+                "momento, etc.) no afecta el pago — se puede reintentar con la acción "
+                '"Reintentar aviso a presupuestos3d".'
+            ),
+            "fields": ("presupuestos3d_sync_error_detalle",),
         }),
         ("Transferencia — comprobante", {
             "fields": ("transfer_receipt", "transfer_receipt_uploaded_at", "transfer_receipt_preview"),
@@ -209,6 +241,35 @@ class OrderAdmin(admin.ModelAdmin):
             '<div style="color:#b91c1c; background:#fee2e2; border:1px solid #fecaca; '
             'border-radius:6px; padding:10px 14px; font-weight:600; max-width:640px;">{}</div>',
             obj.correo_argentino_sync_error,
+        )
+
+    @admin.display(description="Aviso a presupuestos3d")
+    def estado_aviso_presupuestos3d(self, obj):
+        """Columna de un vistazo, mismo criterio que
+        `estado_envio_correo_argentino` — antes un fallo del aviso (ej. token
+        vencido) solo se veía en los logs/Sentry, nunca en el admin."""
+        if obj.status != Order.Status.PAID:
+            return "—"
+        if obj.presupuestos3d_sync_error:
+            return format_html(
+                '<span style="color: #b91c1c; font-weight: 600; cursor: help;" title="{}">'
+                "⚠ Error</span>",
+                obj.presupuestos3d_sync_error,
+            )
+        return format_html('<span style="color: #15803d; font-weight: 600;">✓ Avisado</span>')
+
+    @admin.display(description="Error del aviso a presupuestos3d")
+    def presupuestos3d_sync_error_detalle(self, obj):
+        """Mismo dato que `presupuestos3d_sync_error` crudo, resaltado igual
+        que `correo_argentino_sync_error_detalle` — para que no haya que
+        adivinar por qué una orden pagada no apareció como aviso en el admin
+        de presupuestos3d."""
+        if not obj.presupuestos3d_sync_error:
+            return "(sin error)"
+        return format_html(
+            '<div style="color:#b91c1c; background:#fee2e2; border:1px solid #fecaca; '
+            'border-radius:6px; padding:10px 14px; font-weight:600; max-width:640px;">{}</div>',
+            obj.presupuestos3d_sync_error,
         )
 
     @admin.display(description="Vista previa del comprobante")
@@ -338,6 +399,50 @@ class OrderAdmin(admin.ModelAdmin):
             self.message_user(
                 request,
                 f"{omitidas} orden(es) no son de Correo Argentino (shipping_method) — se omitieron.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(description="Reintentar aviso a presupuestos3d")
+    def reintentar_aviso_presupuestos3d(self, request, queryset):
+        """Vuelve a llamar `_notify_presupuestos3d()` para las órdenes
+        seleccionadas — mismo patrón que `reintentar_alta_correo_argentino`.
+        Solo tiene sentido sobre pedidos `PAID` (es cuando se dispara el aviso
+        normalmente); se omiten los que no lo son. presupuestos3d es
+        idempotente por `external_reference`, así que reintentar una orden
+        ya avisada con éxito no duplica el `PedidoOnline` — en el peor caso,
+        hoy lo devuelve sin actualizar (ver `presupuestos3d/CLAUDE.md`), así
+        que el uso real de esta acción es para los casos que quedaron en
+        error, no para "refrescar" uno ya avisado bien.
+        """
+        exitosas = 0
+        fallidas = []
+        omitidas = 0
+        for order in queryset:
+            if order.status != Order.Status.PAID:
+                omitidas += 1
+                continue
+            _notify_presupuestos3d(order)
+            if order.presupuestos3d_sync_error:
+                fallidas.append(order)
+            else:
+                exitosas += 1
+
+        if exitosas:
+            self.message_user(
+                request,
+                f"Se avisó a presupuestos3d para {exitosas} orden(es).",
+            )
+        for order in fallidas:
+            self.message_user(
+                request,
+                f"Orden {reference_code(order)} ({order.id}) — presupuestos3d rechazó/falló el aviso: "
+                f"{order.presupuestos3d_sync_error}",
+                level=messages.ERROR,
+            )
+        if omitidas:
+            self.message_user(
+                request,
+                f"{omitidas} orden(es) no están en estado Pagado — se omitieron.",
                 level=messages.WARNING,
             )
 

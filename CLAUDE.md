@@ -368,6 +368,42 @@ Probado en vivo contra la API real (2026-10-21):
 
 ---
 
+## Flujo de trabajo
+
+Reglas generales (ramas, checklist antes de pushear, rollback) en
+`~/.claude/CLAUDE.md` (global). Específico de este repo:
+
+- **Nunca commit/push directo a `main`** — es la rama que Railway autodeploya.
+  Rama nueva por feature/fix, probar en local con `docker compose up`, recién
+  ahí mergear.
+- **No hay staging separado en Railway todavía** — es el gap de infraestructura
+  más prioritario de todo el ecosistema (ver `~/Escritorio/3darg/CLAUDE.md`).
+  Hasta que exista, cambios en `payments/`, `orders/signals.py` o migraciones
+  de DB se prueban especialmente a fondo en local antes de mergear — ahí es
+  donde un bug llega directo a pagos reales.
+- **Migraciones**: revisar que sean reversibles antes de aplicar en prod. Si
+  tocan una tabla con datos reales, pensar si hace falta backup antes
+  (`railway run pg_dump` o equivalente) — no asumir que Railway hace backup
+  automático accesible fácilmente.
+- **Env vars nuevas**: si el código las lee, confirmar que ya están seteadas
+  en Railway (`railway variables --service web`) antes de pushear, o el
+  deploy puede quedar corriendo con el feature apagado (o romperse, según el
+  caso) sin que sea obvio por qué.
+- **Nunca imprimir/loggear valores de secrets** (tokens, API keys) al
+  diagnosticar algo, ni siquiera parcialmente enmascarados con un `sed`/`grep`
+  armado a mano — un patrón que no matchea el formato real de la salida
+  termina mostrando el valor real sin querer. Si pasa, avisar enseguida y
+  rotar el secret.
+- **Deploy manual puntual**: `railway up --service web --ci --yes` desde el
+  repo local. **No** `railway service redeploy` (no trae el último commit de
+  git).
+- **Rollback rápido**: `railway deployments` → volver a un deploy anterior sin
+  tocar código, mientras se investiga/revierte en git con calma.
+- **Bitácora de deploys**: Slack `#reportes-it` (qué se pusheó y cuándo) —
+  mandar el mensaje siempre se confirma antes con el dueño, no es automático.
+
+---
+
 ## Auth (JWT)
 
 - DRF default: `IsAuthenticatedOrReadOnly`. Las vistas que necesitan auth lo declaran explícito (`permissions.IsAuthenticated`).
