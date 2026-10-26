@@ -11,7 +11,7 @@ from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
 from brands.services.meta_conversions import hash_user_data, send_event as send_meta_event
-from products.models import Product, ProductVariant
+from products.models import Product, ProductImage, ProductVariant
 from shipping.services import correo_argentino
 from shipping.services.correo_argentino import CorreoArgentinoConfigError, CorreoArgentinoError
 from .models import Order
@@ -220,6 +220,59 @@ def _trigger_bambuddy_print(order):
             )
 
 
+_SHIPPING_METHOD_LABELS = {
+    "correoargentino": "Correo Argentino",
+    "andreani": "Andreani",  # histórico, ver Order.shipping_method
+}
+_SHIPPING_MODALITY_LABELS = {
+    "domicilio": "Domicilio",
+    "sucursal": "Sucursal",
+}
+
+
+def _first_product_image_url(product):
+    """Primera imagen de canal "web" de `product` (según `ProductImage.order`),
+    o "" si el producto no tiene ninguna cargada. `product` puede ser `None`
+    (OrderItem con `product` borrado, ver `on_delete=SET_NULL`).
+
+    `.image.url` ya es una URL absoluta en producción (storage Cloudinary,
+    ver CLAUDE.md raíz "Convenciones globales") — en local, sin Cloudinary
+    configurado, sale relativa (`/media/...`), que no resuelve desde
+    presupuestos3d. No afecta nada más del flujo, es solo para mostrar un
+    thumbnail en su admin.
+    """
+    if product is None:
+        return ""
+    image = next(
+        (img for img in product.images.all() if img.channel == ProductImage.Channel.WEB),
+        None,
+    )
+    return image.image.url if image else ""
+
+
+def _shipping_info(order):
+    """Resumen de envío para el aviso a presupuestos3d: método/modalidad en
+    texto legible y ciudad/provincia de destino — datos cargados por el
+    comprador en el checkout, disponibles ANTES de que se confirme el pago.
+
+    A propósito NO incluye `correo_argentino_tracking_number`/
+    `correo_argentino_sync_error`: en `handle_order_status_change` (más
+    abajo) `_notify_presupuestos3d` se dispara ANTES que
+    `_create_correo_argentino_shipment`, así que esos dos campos todavía
+    estarían vacíos en este punto — y como `PedidoOnline` es un snapshot que
+    nunca se vuelve a actualizar, mandarlos igual quedaría siempre en blanco
+    sin que sea un reflejo real de nada. El estado real y actualizado del
+    envío se ve entrando al link de la Order en este mismo admin (ver
+    `order_admin_link` del lado de presupuestos3d).
+    """
+    return {
+        "method": _SHIPPING_METHOD_LABELS.get(order.shipping_method, order.shipping_method),
+        "modality": _SHIPPING_MODALITY_LABELS.get(order.shipping_modality, order.shipping_modality),
+        "city": order.shipping_city,
+        "province": order.shipping_province,
+    }
+
+
 def _notify_presupuestos3d(order):
     """Avisa a presupuestos3d (sistema interno de gestión) que entró una venta
     online, para que el dueño la revise y la cargue a mano como Presupuesto
@@ -233,6 +286,14 @@ def _notify_presupuestos3d(order):
     Solo actúa si PRESUPUESTOS3D_API_URL y PRESUPUESTOS3D_API_TOKEN están
     configurados en .env. Los errores se loguean pero nunca rompen el flujo
     de pago (mismo criterio que `_trigger_bambuddy_print`).
+
+    Contrato con presupuestos3d (`budgets.PedidoOnline`, ver su CLAUDE.md
+    sección "Flujo de trabajo"): un campo nuevo acá que presupuestos3d
+    todavía no sepa guardar no rompe nada — DRF ignora las claves no
+    declaradas en `PedidoOnlineSerializer` al crear. Mismo criterio a la
+    inversa: si presupuestos3d ya tiene los campos nuevos pero esta orden
+    todavía no los manda (branch vieja desplegada), quedan con su default
+    vacío. No hace falta coordinar el orden exacto del deploy por esto.
     """
     api_url = getattr(settings, "PRESUPUESTOS3D_API_URL", "").rstrip("/")
     api_token = getattr(settings, "PRESUPUESTOS3D_API_TOKEN", "")
@@ -243,13 +304,23 @@ def _notify_presupuestos3d(order):
         )
         return
 
+    order_items = (
+        order.order_items.all()
+        .select_related("product", "variant")
+        .prefetch_related("product__images")
+    )
     items = [
         {
             "product_name": item.product_name,
             "quantity": item.quantity,
             "unit_price": float(item.unit_price),
+            "sku": (item.variant.sku if item.variant_id and item.variant.sku else "")
+            or (item.product.sku if item.product_id else ""),
+            "product_slug": item.product.slug if item.product_id else "",
+            "variant_label": item.variant_label,
+            "image_url": _first_product_image_url(item.product),
         }
-        for item in order.order_items.all()
+        for item in order_items
     ]
     payload = json.dumps({
         "external_reference": order.external_reference,
@@ -260,6 +331,8 @@ def _notify_presupuestos3d(order):
         "total_amount": float(order.total_amount),
         "currency": order.currency,
         "order_created_at": order.created_at.isoformat() if order.created_at else None,
+        "payment_method": order.get_payment_channel_display(),
+        "shipping_info": _shipping_info(order),
         "raw_payload": {
             "order_id": str(order.id),
         },
