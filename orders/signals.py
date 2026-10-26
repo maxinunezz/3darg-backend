@@ -285,7 +285,12 @@ def _notify_presupuestos3d(order):
 
     Solo actúa si PRESUPUESTOS3D_API_URL y PRESUPUESTOS3D_API_TOKEN están
     configurados en .env. Los errores se loguean pero nunca rompen el flujo
-    de pago (mismo criterio que `_trigger_bambuddy_print`).
+    de pago (mismo criterio que `_trigger_bambuddy_print`) — y además quedan
+    guardados en `order.presupuestos3d_sync_error` (mismo patrón que
+    `correo_argentino_sync_error`), visible en el admin, para que el dueño
+    pueda notar el fallo y reintentar (acción "Reintentar aviso a
+    presupuestos3d"). Si la integración está apagada (vars vacías) o el
+    envío sale bien, el campo se deja/limpia en "".
 
     Contrato con presupuestos3d (`budgets.PedidoOnline`, ver su CLAUDE.md
     sección "Flujo de trabajo"): un campo nuevo acá que presupuestos3d
@@ -360,11 +365,20 @@ def _notify_presupuestos3d(order):
             "presupuestos3d HTTP %s al avisar venta orden=%s: %s",
             e.code, order.id, body,
         )
+        order.presupuestos3d_sync_error = f"HTTP {e.code}: {body}"
+        order.save(update_fields=["presupuestos3d_sync_error"])
+        return
     except Exception as e:
         logger.error(
             "presupuestos3d error inesperado al avisar venta orden=%s: %s",
             order.id, e,
         )
+        order.presupuestos3d_sync_error = str(e)
+        order.save(update_fields=["presupuestos3d_sync_error"])
+        return
+
+    order.presupuestos3d_sync_error = ""
+    order.save(update_fields=["presupuestos3d_sync_error"])
 
 
 def _create_correo_argentino_shipment(order):

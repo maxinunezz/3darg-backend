@@ -120,6 +120,17 @@ class Order(models.Model):
     )
     transfer_receipt_uploaded_at = models.DateTimeField(null=True, blank=True)
 
+    # Resultado del aviso de venta a presupuestos3d (sistema interno de
+    # gestión, repo aparte) — ver `orders/signals.py::_notify_presupuestos3d`.
+    # Vacío si la integración no está configurada (`PRESUPUESTOS3D_API_URL`/
+    # `_API_TOKEN` en blanco), si el pago todavía no se confirmó, o si el
+    # último aviso se envió bien. Mismo criterio que
+    # `correo_argentino_sync_error`: nunca rompe la confirmación del pago,
+    # solo queda visible acá para que el dueño note un fallo (token vencido,
+    # presupuestos3d caído, etc.) y pueda reintentar desde el admin (acción
+    # "Reintentar aviso a presupuestos3d").
+    presupuestos3d_sync_error = models.TextField(blank=True)
+
     items = models.JSONField(default=list, blank=True)
 
     external_reference = models.CharField(max_length=80, unique=True, blank=True)
