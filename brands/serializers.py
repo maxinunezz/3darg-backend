@@ -47,10 +47,15 @@ class BrandSerializer(serializers.ModelSerializer):
 
     def get_children(self, obj):
         """
-        Recupera de forma recursiva las marcas hijas activas
+        Recupera de forma recursiva las marcas hijas activas. Usa
+        `active_children` si vino prefetcheado (ver BrandListAPIView) para
+        evitar una query extra por marca raíz; si no, cae a la query normal
+        (ej. cuando el serializer se usa fuera de esa vista).
         """
-        children = obj.children.filter(is_active=True)
-        return BrandSerializer(children, many=True).data
+        children = getattr(obj, "active_children", None)
+        if children is None:
+            children = obj.children.filter(is_active=True)
+        return BrandSerializer(children, many=True, context=self.context).data
 
     def get_meta_public_config(self, obj):
         """
