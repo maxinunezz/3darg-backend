@@ -2,6 +2,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from products.models import Product, ProductVariant
+from products.talles_lumy import es_cortante_lumy
 
 # Las tres "tallas" que debe poder mostrar el selector del frontend en TODOS
 # los productos — pedido explícito del dueño: "quiero que todos los
@@ -51,6 +52,11 @@ class Command(BaseCommand):
         skipped_ambiguous = []
 
         for product in Product.objects.prefetch_related("variants").order_by("pk"):
+            # Los cortantes de Lumy tienen su propia regla de talles (nombres y
+            # medidas distintos, ver products/talles_lumy.py) — este comando no
+            # los toca, si no crearía duplicados con los nombres viejos.
+            if es_cortante_lumy(product):
+                continue
             variants = list(product.variants.all())
             by_size = {v.size: v for v in variants}
 
