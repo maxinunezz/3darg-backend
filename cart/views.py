@@ -132,6 +132,9 @@ class CartItemAPIView(APIView):
 
 
 class CartQuoteThrottle(AnonRateThrottle):
+    # Contador propio (ver config/throttles.py): sin `scope`, compartía el del
+    # throttle global "anon" y navegar el sitio agotaba este límite.
+    scope = "cart_quote"
     # Se recalcula en vivo en cada cambio de cantidad del carrito de
     # invitado (ver CartContext.tsx) — throttle más permisivo que un form de
     # baja frecuencia, mismo criterio que ShippingQuoteThrottle.

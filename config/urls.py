@@ -5,12 +5,20 @@ from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 import config.admin_dashboard  # noqa: F401 — aplica el reagrupamiento del sidebar del admin
+from config.throttles import LoginEmailThrottle, LoginIPThrottle, install_admin_login_throttle
+
+# Tiene que ir antes de `admin.site.urls` (que toma `admin.site.login` al armarse).
+install_admin_login_throttle()
 
 urlpatterns = [
     path("admin/", admin.site.urls),
 
-    # Auth JWT
-    path("api/auth/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    # Auth JWT — con límite de intentos por IP y por cuenta (ver config/throttles.py)
+    path(
+        "api/auth/token/",
+        TokenObtainPairView.as_view(throttle_classes=[LoginIPThrottle, LoginEmailThrottle]),
+        name="token_obtain_pair",
+    ),
     path("api/auth/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
 
     # Usuarios
