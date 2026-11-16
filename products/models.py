@@ -1065,6 +1065,9 @@ class ProductVariant(models.Model):
             canonico = talle_canonico(self.size)
             if canonico is not None:
                 self.size, self.order = canonico
+                # Bajo pedido: los tres talles de un cortante siempre se
+                # venden, aunque alguien destilde "disponible" en el admin.
+                self.is_available = True
                 if "size" in update_kwargs:
                     update_kwargs["size"] = self.size
         super().save(*args, **kwargs)
