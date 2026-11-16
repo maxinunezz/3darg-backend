@@ -12,6 +12,9 @@ from .services.quote import get_quotes, select_methods
 
 
 class ShippingQuoteThrottle(AnonRateThrottle):
+    # Contador propio (ver config/throttles.py): sin `scope`, compartía el del
+    # throttle global "anon" y navegar el sitio agotaba este límite.
+    scope = "shipping_quote"
     # Se consulta en vivo mientras el usuario completa el checkout (no es un
     # formulario de contacto de baja frecuencia) — throttle más permisivo.
     rate = "30/minute"

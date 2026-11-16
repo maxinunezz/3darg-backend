@@ -28,6 +28,9 @@ def _resolve_contact_email(brand_slug: str) -> str:
 
 
 class ContactThrottle(AnonRateThrottle):
+    # Contador propio (ver config/throttles.py): sin `scope`, compartía el del
+    # throttle global "anon" y navegar el sitio agotaba este límite.
+    scope = "contact"
     rate = "5/hour"
 
 

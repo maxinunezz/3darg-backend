@@ -15,6 +15,9 @@ CONTACT_EMAIL = getattr(settings, "CONTACT_EMAIL", "3darg1@gmail.com")
 
 
 class VendingLeadThrottle(AnonRateThrottle):
+    # Contador propio (ver config/throttles.py): sin `scope`, compartía el del
+    # throttle global "anon" y navegar el sitio agotaba este límite.
+    scope = "vending_lead"
     rate = "5/hour"
 
 

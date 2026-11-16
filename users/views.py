@@ -12,6 +12,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
+from config.throttles import GoogleAuthThrottle, RegisterThrottle
 from django.shortcuts import get_object_or_404
 from .models import Favorite
 from .serializers import (
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [RegisterThrottle]
 
 
 class GoogleAuthView(APIView):
@@ -40,6 +42,7 @@ class GoogleAuthView(APIView):
     """
 
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [GoogleAuthThrottle]
 
     def post(self, request):
         serializer = GoogleAuthSerializer(data=request.data)
@@ -78,6 +81,9 @@ class ChangePasswordView(APIView):
 
 
 class PasswordResetThrottle(AnonRateThrottle):
+    # Contador propio (ver config/throttles.py): sin `scope`, compartía el del
+    # throttle global "anon" y navegar el sitio agotaba este límite.
+    scope = "password_reset"
     rate = "5/hour"
 
 
