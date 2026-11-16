@@ -1055,6 +1055,18 @@ class ProductVariant(models.Model):
             if template.size_label:
                 self.size = template.size_label
                 update_kwargs["size"] = template.size_label
+        # Cortantes de Lumy: el nombre del talle es SIEMPRE el canónico
+        # ("Chico 4-6cm"/"Mediano 7-9cm"/"Grande 10-12cm", ver
+        # products/talles_lumy.py) — le gana al `size_label` del template y a
+        # lo que se haya tipeado a mano.
+        from products.talles_lumy import es_cortante_lumy, talle_canonico
+
+        if es_cortante_lumy(self.product):
+            canonico = talle_canonico(self.size)
+            if canonico is not None:
+                self.size, self.order = canonico
+                if "size" in update_kwargs:
+                    update_kwargs["size"] = self.size
         super().save(*args, **kwargs)
         if update_kwargs and ProductVariant.objects.filter(product_id=self.product_id).count() <= 1:
             Product.objects.filter(pk=self.product_id).update(**update_kwargs)
