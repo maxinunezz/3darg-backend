@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
-from django.db.models import Prefetch
+from django.db.models import Prefetch, Q
 from django.http import HttpResponse, Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
@@ -18,6 +18,13 @@ from brands.models import Brand
 from mercadolibre.services import MLSyncError, sync_product
 
 logger = logging.getLogger(__name__)
+
+# Una marca con `is_active=False` ya desaparece de `GET /api/brands/` (y por eso
+# su landing da 404 en el frontend), pero sus productos seguían saliendo en el
+# listado general y por link directo (`/product/<slug>`). Con este filtro, apagar
+# una marca desde el admin la oculta por completo — catálogo incluido — hasta
+# que se la vuelva a activar. Productos sin marca asignada siguen visibles.
+PUBLIC_BRAND_FILTER = Q(brand__isnull=True) | Q(brand__is_active=True)
 
 # Fotos marcadas "Solo Mercado Libre" no se muestran en la web/el feed de Meta-Google.
 WEB_IMAGES_PREFETCH = Prefetch("images", queryset=ProductImage.objects.exclude(channel="ml"))
@@ -40,6 +47,7 @@ class ProductListAPIView(generics.ListAPIView):
         qs = (
             Product.objects.visible_to(self.request.user)
             .filter(is_available=True, is_available_web=True)
+            .filter(PUBLIC_BRAND_FILTER)
             .prefetch_related(WEB_IMAGES_PREFETCH, "variants")
             .select_related("category", "brand")
         )
@@ -75,9 +83,11 @@ class ProductDetailAPIView(generics.RetrieveAPIView):
         # Los productos members_only devuelven 404 a anónimos (no se filtran al
         # frontend). Los apagados puntualmente en el canal web (is_available_web)
         # o en general (is_available) también devuelven 404 — mismo criterio.
+        # Idem productos de una marca apagada (ver PUBLIC_BRAND_FILTER).
         return (
             Product.objects.visible_to(self.request.user)
             .filter(is_available=True, is_available_web=True)
+            .filter(PUBLIC_BRAND_FILTER)
             .prefetch_related(WEB_IMAGES_PREFETCH, "variants")
             .select_related("category", "brand")
         )
