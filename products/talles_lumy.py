@@ -13,10 +13,13 @@ informativo, nunca bloquea la compra).
 
 Dónde se aplica (para que nadie tenga que acordarse de cargarlo a mano):
 - `ProductVariant.save()` fuerza el nombre canónico del talle, incluso si un
-  `CostTemplate` vinculado trae otro `size_label` (ej. "Mediano 8cm").
+  `CostTemplate` vinculado trae otro `size_label` (ej. "Mediano 8cm"), y lo
+  deja siempre disponible (no se puede apagar un talle desde el admin).
 - Señal `post_save` de `Product` (`products/signals.py`): completa los talles
   que falten al crear o guardar un cortante de Lumy.
 - Migración `0041_talles_cortantes_lumy`: normalizó el catálogo existente.
+- Migración `0042_talles_cortantes_lumy_activos`: prendió los talles que
+  habían quedado apagados a mano.
 - `python manage.py normalizar_talles_cortantes_lumy`: re-aplica la regla a
   mano sobre todo el catálogo (por si algo quedó cargado por otro camino).
 
@@ -107,7 +110,8 @@ def _sku_libre(base: str, sufijo: str) -> str:
 def normalizar_talles(product) -> dict:
     """Deja a `product` con exactamente los tres talles canónicos.
 
-    - Renombra/reordena los talles existentes (por la palabra inicial).
+    - Renombra/reordena los talles existentes (por la palabra inicial) y los
+      deja disponibles (`is_available=True`).
     - Crea los que falten: mismo precio que sus hermanos, stock 0, disponible.
     - No borra nada: una variante que no sea Chico/Mediano/Grande se deja
       como está y se informa en el resultado.
@@ -137,8 +141,11 @@ def normalizar_talles(product) -> dict:
     for clave, nombre, orden, sufijo in TALLES:
         v = por_clave.get(clave)
         if v is not None:
-            if v.size != nombre or v.order != orden:
-                ProductVariant.objects.filter(pk=v.pk).update(size=nombre, order=orden)
+            # Además, el talle queda siempre disponible: se produce bajo
+            # pedido, así que un talle apagado a mano en el admin (pasó con
+            # los Mediano de Animales de Granja) no puede ocultarse de la ficha.
+            if v.size != nombre or v.order != orden or not v.is_available:
+                ProductVariant.objects.filter(pk=v.pk).update(size=nombre, order=orden, is_available=True)
                 resultado["renombradas"] += 1
             continue
         ProductVariant.objects.create(
