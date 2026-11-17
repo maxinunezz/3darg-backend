@@ -329,7 +329,13 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '10000/day',
+        # Por minuto (antes 10000/día): las páginas del frontend le piden datos a
+        # esta API desde el servidor de la web, con una sola IP para todos los
+        # visitantes — un límite diario chico podía terminar bloqueando el sitio
+        # entero con tráfico real (o con Google rastreando el sitemap). Los
+        # endpoints sensibles (login, checkout, formularios) tienen su propio
+        # límite más estricto (ver config/throttles.py y cada vista).
+        'anon': '600/minute',
         'user': '50000/day',
     },
 }
@@ -374,6 +380,9 @@ if not DEBUG:
     SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "0") == "1"
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    # HSTS: el navegador usa siempre HTTPS para api.3darg.com (sin
+    # includeSubDomains a propósito). Configurable; 0 = apagado.
+    SECURE_HSTS_SECONDS = int(os.getenv("DJANGO_SECURE_HSTS_SECONDS", "31536000"))
 
 # --- Email ---
 # Proveedor: Resend, vía su API HTTP (`config/email_backends.py`), no SMTP —
