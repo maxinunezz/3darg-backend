@@ -409,7 +409,7 @@ Reglas generales (ramas, checklist antes de pushear, rollback) en
 - DRF default: `IsAuthenticatedOrReadOnly`. Las vistas que necesitan auth lo declaran explícito (`permissions.IsAuthenticated`).
 - Las vistas de pagos y contacto declaran `AllowAny` porque pueden invocarse sin sesión.
 - JWT: `ACCESS_TOKEN_LIFETIME=2h`, `REFRESH_TOKEN_LIFETIME=7d`, `ROTATE_REFRESH_TOKENS=True`.
-- Throttling: anónimos `10000/day`, usuarios `50000/day`. `contact` aplica un throttle adicional de `5/hour` por IP.
+- Throttling: anónimos `600/minute` (antes `10000/day`, ver comentario en `settings.py`), usuarios `50000/day`. Login, registro, admin y cada formulario público tienen además su propio throttle con `scope` propio (ver `config/throttles.py` — sin `scope` comparten el contador global y se bloquean al navegar).
 - CORS: `http://localhost:3000` en dev; en producción (Railway) `CORS_ALLOWED_ORIGINS=https://3darg.com,https://www.3darg.com`. CSRF acepta `*.ngrok-free.app` para los webhooks de MP en desarrollo; en prod, `https://3darg.com,https://www.3darg.com`.
 
 ### Login con Google (`POST /api/users/google/`)
