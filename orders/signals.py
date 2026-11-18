@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 
 from django.conf import settings
+from config.email_from import brand_from_email
 from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models.signals import post_save, pre_save
@@ -500,7 +501,7 @@ def _send_payment_email(order):
         send_mail(
             subject,
             message,
-            settings.DEFAULT_FROM_EMAIL,
+            brand_from_email(order.brand if order.brand_id else None),
             [order.customer_email],
             fail_silently=False,
         )
@@ -546,7 +547,7 @@ def _send_oversold_notification_email(order, oversold_lines):
         f"producto/variante en cuestión va a mostrar stock negativo.\n"
     )
     try:
-        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [owner_email], fail_silently=False)
+        send_mail(subject, message, brand_from_email(order.brand if order.brand_id else None), [owner_email], fail_silently=False)
         logger.info("Aviso de venta por encima del stock enviado a %s (orden %s)", owner_email, order.id)
     except Exception as e:
         logger.error("Error enviando aviso de oversold para orden %s: %s", order.id, e)
@@ -583,7 +584,7 @@ def _send_owner_notification_email(order):
         send_mail(
             subject,
             message,
-            settings.DEFAULT_FROM_EMAIL,
+            brand_from_email(order.brand if order.brand_id else None),
             [owner_email],
             fail_silently=False,
         )

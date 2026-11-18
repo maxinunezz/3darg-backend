@@ -1,5 +1,6 @@
 import logging
 from django.conf import settings
+from config.email_from import brand_from_email
 from django.core.mail import send_mail
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -42,7 +43,7 @@ class VendingLeadAPIView(APIView):
                     f"Segmento: {lead.get_segmento_display()}\n\n"
                     f"Mensaje:\n{lead.mensaje or '-'}"
                 ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
+                from_email=brand_from_email(),
                 recipient_list=[CONTACT_EMAIL],
                 fail_silently=True,
             )

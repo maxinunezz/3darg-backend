@@ -2,6 +2,7 @@ import logging
 import os
 
 from django.conf import settings
+from config.email_from import brand_from_email
 from django.core.mail import EmailMultiAlternatives
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -156,7 +157,7 @@ class ContactAPIView(APIView):
                     f"{phone_line}"
                     f"\nAsunto: {title}\n\n{body}"
                 ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
+                from_email=brand_from_email(brand_slug=brand_slug),
                 to=[to_email],
                 reply_to=[email],
             )
@@ -174,7 +175,7 @@ class ContactAPIView(APIView):
                     f"Mientras tanto, unite a nuestro canal de Telegram: {TELEGRAM_URL}\n\n"
                     f"— Equipo {brand_name}"
                 ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
+                from_email=brand_from_email(brand_slug=brand_slug),
                 to=[email],
             )
             confirm.attach_alternative(_build_confirm_html(title, TELEGRAM_URL, brand_name), "text/html")

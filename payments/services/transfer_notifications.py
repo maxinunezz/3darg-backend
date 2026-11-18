@@ -14,6 +14,7 @@ import logging
 import os
 
 from django.conf import settings
+from config.email_from import brand_from_email
 from django.core.mail import send_mail
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ def send_transfer_instructions_email(order):
         send_mail(
             f"Instrucciones para tu transferencia — {order.brand.name}",
             message,
-            settings.DEFAULT_FROM_EMAIL,
+            brand_from_email(order.brand if order.brand_id else None),
             [order.customer_email],
             fail_silently=False,
         )
@@ -135,7 +136,7 @@ def send_transfer_pending_owner_email(order):
             f"Pedido pendiente de transferencia — {order.brand.name} — "
             f"{order.currency} {order.total_amount}",
             message,
-            settings.DEFAULT_FROM_EMAIL,
+            brand_from_email(order.brand if order.brand_id else None),
             [owner_email],
             fail_silently=False,
         )
@@ -183,7 +184,7 @@ def send_transfer_receipt_uploaded_email(order, receipt_url: str = ""):
         send_mail(
             f"Comprobante recibido — pedido {reference_code(order)}",
             message,
-            settings.DEFAULT_FROM_EMAIL,
+            brand_from_email(order.brand if order.brand_id else None),
             [owner_email],
             fail_silently=False,
         )
