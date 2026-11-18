@@ -2,6 +2,7 @@ import logging
 import os
 
 from django.conf import settings
+from config.email_from import brand_from_email
 from django.core.mail import send_mail
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -57,7 +58,7 @@ class WhatsAppCommunityLeadAPIView(APIView):
                     f"Teléfono: {lead.phone}\n"
                     f"Tipo de cliente: {segments_label}\n"
                 ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
+                from_email=brand_from_email(brand_slug=lead.brand or ""),
                 recipient_list=[to_email],
                 fail_silently=True,
             )

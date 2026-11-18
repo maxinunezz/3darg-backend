@@ -2,6 +2,7 @@ import logging
 import os
 
 from django.conf import settings
+from config.email_from import brand_from_email
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
@@ -125,7 +126,7 @@ class PasswordResetRequestView(APIView):
                     f"Entrá a este link para elegir una nueva (válido por 3 días):\n{reset_url}\n\n"
                     "Si no lo pediste vos, podés ignorar este mensaje."
                 ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
+                from_email=brand_from_email(),
                 recipient_list=[user.email],
                 fail_silently=True,
             )
