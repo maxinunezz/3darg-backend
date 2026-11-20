@@ -262,7 +262,11 @@ def get_rates(*, postal_code_destination: str, weight_grams: int, height_cm: int
         rates = data.get("rates")
         return rates if isinstance(rates, list) else None
     except requests.RequestException as e:
-        logger.error("Correo Argentino: error de red al cotizar: %s", e)
+        # warning, no error: el caller (quote.py) ya cae a la tarifa de
+        # respaldo en este caso — el checkout nunca se rompe, es solo la
+        # API externa de Correo Argentino fallando de forma transitoria
+        # (ver Sentry PYTHON-DJANGO-1Q, 9 ocurrencias sin impacto real).
+        logger.warning("Correo Argentino: error de red al cotizar: %s", e)
         return None
     except (ValueError, KeyError, TypeError) as e:
         logger.error("Correo Argentino: respuesta inesperada de /rates: %s", e)
