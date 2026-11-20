@@ -44,12 +44,17 @@ class ProductListAPIView(generics.ListAPIView):
     ordering = ["name"]
 
     def get_queryset(self):
+        # "category__parent" en select_related: `CategorySerializer` lee
+        # `parent.id`/`parent.name`/`parent.slug` por cada producto — mismo
+        # N+1 ya resuelto en `CategoryListAPIView.get_queryset()` arriba,
+        # pero acá faltaba (confirmado real en Sentry: PYTHON-DJANGO-1J,
+        # 10 usuarios afectados en /api/products/).
         qs = (
             Product.objects.visible_to(self.request.user)
             .filter(is_available=True, is_available_web=True)
             .filter(PUBLIC_BRAND_FILTER)
             .prefetch_related(WEB_IMAGES_PREFETCH, "variants")
-            .select_related("category", "brand")
+            .select_related("category", "category__parent", "brand")
         )
         brand_slug = self.request.query_params.get("brand_slug")
         if brand_slug:
@@ -89,7 +94,7 @@ class ProductDetailAPIView(generics.RetrieveAPIView):
             .filter(is_available=True, is_available_web=True)
             .filter(PUBLIC_BRAND_FILTER)
             .prefetch_related(WEB_IMAGES_PREFETCH, "variants")
-            .select_related("category", "brand")
+            .select_related("category", "category__parent", "brand")
         )
 
 
