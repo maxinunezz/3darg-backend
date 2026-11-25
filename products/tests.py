@@ -240,12 +240,15 @@ class ProductAdminCategoryFieldTests(TestCase):
         }
         for field in self.REQUIRED_DECIMAL_FIELDS:
             data[field] = "0"
-        data.update({
-            "images-TOTAL_FORMS": "0",
-            "images-INITIAL_FORMS": "0",
-            "images-MIN_NUM_FORMS": "0",
-            "images-MAX_NUM_FORMS": "1000",
-        })
+        # Dos apartados de imágenes (Web y Mercado Libre, mismo modelo): Django los
+        # prefija "images" e "images-2", y cada uno necesita su management form.
+        for prefijo in ("images", "images-2"):
+            data.update({
+                f"{prefijo}-TOTAL_FORMS": "0",
+                f"{prefijo}-INITIAL_FORMS": "0",
+                f"{prefijo}-MIN_NUM_FORMS": "0",
+                f"{prefijo}-MAX_NUM_FORMS": "1000",
+            })
         data.update(overrides)
         return data
 

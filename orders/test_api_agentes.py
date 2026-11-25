@@ -74,3 +74,10 @@ class ApiAgentesTests(APITestCase):
         d = self.client.get("/api/agentes/leads/", **self.ok).json()
         self.assertEqual(d["maquina_expendedora"][0]["nombre"], "Kiosco Juan")
         self.assertNotIn("j@x.com", str(d))
+
+
+class SaludTests(APITestCase):
+    def test_salud_responde_ok_con_el_host_del_healthcheck(self):
+        r = self.client.get("/salud/", HTTP_HOST="healthcheck.railway.app")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"ok": True})

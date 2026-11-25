@@ -56,6 +56,8 @@ if not SECRET_KEY:
             "del servicio (Railway) antes de desplegar."
         )
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost").split(",") if h.strip()]
+# El healthcheck de Railway entra con este Host: sin él, /salud/ daría 400 y el deploy nunca quedaría sano.
+ALLOWED_HOSTS.append("healthcheck.railway.app")
 
 # --- Google OAuth (login "Continuar con Google") ---
 # Client ID de un proyecto en Google Cloud Console (OAuth consent screen + credencial

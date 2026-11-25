@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from django.http import JsonResponse
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 import config.admin_dashboard  # noqa: F401 — aplica el reagrupamiento del sidebar del admin
@@ -11,6 +12,8 @@ from config.throttles import LoginEmailThrottle, LoginIPThrottle, install_admin_
 install_admin_login_throttle()
 
 urlpatterns = [
+    # Healthcheck de Railway: mientras el deploy nuevo no responda acá, sigue sirviendo el anterior.
+    path("salud/", lambda request: JsonResponse({"ok": True}), name="salud"),
     path("admin/", admin.site.urls),
 
     # Auth JWT — con límite de intentos por IP y por cuenta (ver config/throttles.py)
