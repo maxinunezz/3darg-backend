@@ -32,6 +32,7 @@ urlpatterns = [
 
     # Órdenes y carrito
     path("api/orders/", include("orders.urls")),
+    path("api/agentes/", include("orders.urls_agentes")),  # solo lectura, token de agentes
     path("api/cart/", include("cart.urls")),
 
     # Contacto

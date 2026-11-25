@@ -73,6 +73,8 @@ BAMBUDDY_PRINTER_ID = int(os.getenv("BAMBUDDY_PRINTER_ID", "1"))  # ID de la imp
 # un no-op — no rompe el flujo de pago.
 PRESUPUESTOS3D_API_URL = os.getenv("PRESUPUESTOS3D_API_URL", "")      # ej: http://localhost:8001
 PRESUPUESTOS3D_API_TOKEN = os.getenv("PRESUPUESTOS3D_API_TOKEN", "")
+# Token de solo lectura para los agentes de IA (Roque). Vacío = /api/agentes/ responde 403.
+AGENTES_API_TOKEN = os.getenv("AGENTES_API_TOKEN", "")
 
 # --- Cotización de envíos: parámetros de cálculo (ver shipping/services/volumetric.py) ---
 # Peso mínimo facturable por pedido (kg) — los cortantes son muy livianos, sin este
