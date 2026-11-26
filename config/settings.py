@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 from datetime import timedelta
 from dotenv import load_dotenv
 from pathlib import Path
@@ -14,7 +15,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # --- Sentry (monitoreo de errores) ---
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
-if SENTRY_DSN:
+# En la compu de desarrollo (DJANGO_DEBUG=1) y al correr los tests NO se reporta a Sentry: antes los tests locales
+# mandaban errores falsos («host.docker.internal», «Connection refused») que parecían caídas de producción
+# (26/11/2026). Para probar Sentry a propósito en local: SENTRY_EN_DESARROLLO=1.
+_ES_DESARROLLO = os.getenv("DJANGO_DEBUG", "0") == "1" or "test" in sys.argv[1:2]
+if SENTRY_DSN and (not _ES_DESARROLLO or os.getenv("SENTRY_EN_DESARROLLO") == "1"):
     import sentry_sdk
 
     sentry_sdk.init(
